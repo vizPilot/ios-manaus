@@ -15,11 +15,14 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 - `xnu/patches-manaus/` is still empty on purpose (only README.md): no override
   until the real MT6879 facts exist.
 - **CI works with Xcode 16.0** (macOS 14 runners were retired 2026-11-02, and
-  macos-15 no longer has Xcode 15.x). Run **42134881143** (commit `339511a`):
-  green in 8.8 min, artifacts `xnu-manaus-kernel` (60.4 MB) and
-  `xnu-manaus-buildtree` (23.2 MB). Workflow picks the oldest Xcode on purpose
-  (iig ABI), and publishes build errors + the kernel sha256 as public check-run
-  annotations because Actions logs need a token.
+  macos-15 no longer has Xcode 15.x). Two green runs: **42134881143** (commit
+  `339511a`, 8.8 min) and **42136147024** (commit `8b34cf5`, 12.5 min, arm64
+  queue). The second proves the kernel is real, published as a public
+  annotation because logs need a token:
+  `kernel.development.sweet 17188640 bytes
+  sha256=493f08ce3509ba43f6df96f1cb3828c82c3270e4f2ac1b34a105b40daf8be356`.
+  Artifacts: `xnu-manaus-kernel` (60.4 MB, includes symbols) and
+  `xnu-manaus-buildtree` (23.2 MB).
 - Tooling built and validated (not yet used on hardware): `tools/mkadt-manaus.py`
   (config-driven ADT; `--check` lists the 20 missing facts), `tools/manaus-intake.sh`
   (read-only device inventory), `tools/bootimg.py` (boot/vendor_boot header
