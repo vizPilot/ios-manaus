@@ -163,6 +163,23 @@ jobs:
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+          # A build that "succeeds" without installing a kernel is a bug, not a pass.
+          if ! compgen -G "out/kernel.*" > /dev/null; then
+            echo "::error title=no kernel::fakeroot/System/Library/Kernels has no kernel.* (nothing was installed)"
+            exit 1
+          fi
+          echo "--- kernels produced ---"
+          cat out/SHA256SUMS || true
+          # Public proof of what was built (artifacts need a login to download).
+          python3 - <<'PY'
+          import glob, hashlib, os
+          for p in sorted(glob.glob("out/kernel.*")):
+              if not os.path.isfile(p) or p.endswith("SHA256SUMS"):
+                  continue
+              h = hashlib.sha256(open(p, "rb").read()).hexdigest()
+              print("::notice title=kernel built::%s %d bytes sha256=%s"
+                    % (os.path.basename(p), os.path.getsize(p), h))
+          PY
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -1,5 +1,43 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## 🔵 manaus (Motorola Edge 40 Neo, MT6879) - active fork handoff (2026-11-05)
+
+**Goal:** same kernel/userland approach as sweet, retargeted to `manaus`
+(MT6879, 2xA78 + 6xA55, Mali-G610, 1080x2400, UFS, A/B, unlocked bootloader).
+Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
+(`origin` = fork, `upstream` = dipa-studio/ios-sweet). No `sweet_*` renames:
+`SWEET` is the name of the platform layer, not the device.
+
+**State:**
+- Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
+  `xnu-8796.141.3`, verified locally (the only two that need the HFS staging
+  script are 0031 and 0041; with `0026-stage-hfs.sh` staged they apply).
+- `xnu/patches-manaus/` is still empty on purpose (only README.md): no override
+  until the real MT6879 facts exist.
+- **CI works with Xcode 16.0** (macOS 14 runners were retired 2026-11-02, and
+  macos-15 no longer has Xcode 15.x). Run **42134881143** (commit `339511a`):
+  green in 8.8 min, artifacts `xnu-manaus-kernel` (60.4 MB) and
+  `xnu-manaus-buildtree` (23.2 MB). Workflow picks the oldest Xcode on purpose
+  (iig ABI), and publishes build errors + the kernel sha256 as public check-run
+  annotations because Actions logs need a token.
+- Tooling built and validated (not yet used on hardware): `tools/mkadt-manaus.py`
+  (config-driven ADT; `--check` lists the 20 missing facts), `tools/mkbootimg-manaus.sh`
+  (MTK v2/v4 boot image), `tools/manaus-intake.sh` (read-only device inventory).
+- Docs: `docs/manaus/{00-FACTIBILIDAD,01-DELTA-HARDWARE,02-TRIAGE-DE-PARCHES,03-PLAN,04-M1}.md`.
+
+**Blocked on the user (M0):** run `tools/manaus-intake.sh` on the phone and send
+the sanitized `.tgz`. It answers the three go/no-go unknowns: does MTK LK
+support `fastboot boot`; does LK leave a usable framebuffer; can UFS `userdata`
+be driven and host an HFS+ root. Without it `hw/manaus.hw.json` keeps its 20
+nulls and no `0004` machine-config override can be written.
+
+**Next action:** fill `hw/manaus.hw.json` from the intake, write
+`xnu/patches-manaus/0004-sweet-machine-config.patch`, then M1 (kernel text on
+the panel) per `docs/manaus/04-M1.md`.
+
+---
+
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
