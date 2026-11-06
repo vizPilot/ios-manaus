@@ -17,6 +17,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG (SWEET until 0004-manaus exists)
         default: SWEET
+      xcode_version:
+        description: Xcode to select (empty = lowest 16.x available)
+        default: "16.0"
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -37,11 +40,18 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+  XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 120
+    # macOS 14 images were retired on 2026-11-02 ("The configuration
+    # 'macos-14-arm64-us-default' is not supported"); macos-15 is arm64 and
+    # only ships Xcode 16.x / 26.x.  Pick the *oldest* Xcode on purpose:
+    # Xcode 15.x is gone, and newer iig (IOKit interface generator) emits
+    # code for a newer xnu ABI than xnu-8796 (e.g. IORPC.kernelContent).
+    # 16.0 is the closest toolchain to the 15.x that xnu-8796 expects.
+    runs-on: macos-15
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -67,20 +77,63 @@ jobs:
       - name: Deps
         run: |
           brew install jq gum bash cmake ninja
-          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
-          sudo chmod +x /usr/local/bin/xcodes
+          # build.sh only checks that `xcodes` exists and that /Applications/Xcode*.app
+          # is non-empty; it then uses the selected Xcode and never downloads anything.
+          if ! command -v xcodes >/dev/null 2>&1; then
+            sudo mkdir -p /usr/local/bin
+            printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+            sudo chmod +x /usr/local/bin/xcodes
+          fi
           sw_vers
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "--- Xcodes installed ---"
+          ls -d /Applications/Xcode*.app || true
+
+          XC="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [ ! -d "$XC" ]; then
+            XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | head -1)
+          fi
+          if [ -z "${XC:-}" ] || [ ! -d "$XC" ]; then
+            XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          fi
+          echo "Selected Xcode: $XC"
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version
-          xcrun --find iig
+          echo "iig: $(xcrun --find iig)"
+          iig --version || true
+          echo "SDK: $(xcrun --sdk macosx --show-sdk-path)"
 
       - name: Build
         working-directory: dxb
         env:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee ../build.log
+
+      - name: Report build errors as annotations
+        # The repo logs are only readable with a token, but check-run annotations
+        # are public: surface the first errors and the tail here.
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import os, re
+          path = "build.log"
+          if not os.path.exists(path):
+              print("::error title=build.log missing::the build never produced a log")
+              raise SystemExit(0)
+          lines = open(path, errors="replace").read().splitlines()
+          pat = re.compile(r"(error:|fatal error|undefined symbol|No such file|not found|KDKROOT|The following build commands failed)", re.I)
+          hits = [l.strip() for l in lines if pat.search(l)]
+          def emit(title, body):
+              body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::error title={title}::{body[:6000]}")
+          if hits:
+              emit("xnu build errors", "\n".join(hits[:50]))
+          emit("xnu build log tail", "\n".join(lines[-40:]))
+          PY
+          echo "--- build.log tail ---"
+          tail -n 60 build.log || true
 
       - name: Package build tree for local compiles
         if: always()
@@ -92,8 +145,8 @@ jobs:
             --exclude='*.o' --exclude='*.cpo' --exclude='*.a' --exclude='*.dSYM' --exclude='*.unstripped' \
             --exclude='kernel.development.*' --exclude='.git' \
             -C dxb build/xnu.obj fakeroot/usr/local/include xnu \
-            -C .. sdk-kernel-platform
-          ls -la buildtree.tgz
+            -C .. sdk-kernel-platform || true
+          ls -la buildtree.tgz || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -101,6 +154,7 @@ jobs:
           name: xnu-manaus-buildtree
           path: buildtree.tgz
           retention-days: 7
+          if-no-files-found: warn
 
       - name: Collect
         if: always()
