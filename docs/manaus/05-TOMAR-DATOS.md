@@ -46,9 +46,21 @@ Consecuencias, en orden:
 - `max-download-size` = 256 MiB: cualquier `boot.img` que empaquetemos tiene
   que caber en una sola descarga (el nuestro son decenas de MiB, sin problema).
 
-### Qué hace falta antes de flashear nada
+### Antes de nada: intento sin root (`fastboot fetch`, 10 segundos)
 
-Un `boot_b.img` original, verificado, en el PC. Vale cualquiera de estas vías:
+El protocolo fastboot tiene `fetch` para leer una partición. Muchos LK de
+fábrica no lo implementan, pero si este lo hace te ahorra el root:
+
+```bash
+fastboot fetch boot_b        boot_b.img
+fastboot fetch vendor_boot_b vendor_boot_b.img
+```
+
+- Si sale `FAILED (remote: 'unknown command')` → no está, se pasa a la tabla.
+- Si funciona: `python3 tools/bootimg.py info boot_b.img` para confirmarlo y ya
+  tienes respaldo exacto sin tocar el teléfono.
+
+### Si no, elige una vía
 
 | Vía | Requisito | Comentario |
 | --- | --- | --- |
@@ -67,7 +79,27 @@ Tiene que salir `header_version 4`, `kernel_size` > 0 y (en `vendor_boot_b`)
 `dtb_size` > 0. Ese DTB es el que usa M1: no hay que buscarlo en otro sitio.
 
 Si no tienes ninguna de las tres vías, dímelo: la descarga del firmware
-`XT2307-1` es la más segura y no depende de root.
+`XT2307-1` es la más segura que no depende de root.
+
+### Firmware oficial (sin root)
+
+El canal de tu unidad es `opencl` (`ro.carrier: opencl`), y los paquetes están
+en el mirror de lolinet:
+
+<https://mirrors.lolinet.com/firmware/lenomola/2023/manaus/official/OPENCL/>
+
+Tu build instalada es `V1TMS35H.3-45-1`; la más parecida publicada es
+`XT2307-1_MANAUS_OPENPUB_15_V1TMS35H.3-45-3-2-7_...zip` (5,2 GB). Sirve para
+sacar `boot.img` y `vendor_boot.img`, pero **no es la misma build**:
+
+- como red, restaurar un `boot` de otra build puede dejar Android en bootloop
+  por desajuste con los módulos de `vendor_dlkm`;
+- por eso el `dd` del teléfono (arriba) es siempre preferible, y el firmware es
+  el plan B.
+
+Si acabas usando el firmware: antes de flashear nada, compara el kernel que
+lleva (`tools/bootimg.py info`) con el que reporta el teléfono
+(`kernel.version` en `hw/manaus.getvar.json`).
 
 ### Sacar las imágenes stock con root o recovery
 
