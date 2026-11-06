@@ -1,8 +1,10 @@
 # 05 — Tomar los datos del teléfono (M0)
 
-Esta fase la ejecuta el usuario en el teléfono. Es **solo lectura**: nada de lo
-que hay aquí escribe particiones ni cambia ajustes. El objetivo es rellenar
-`hw/manaus.hw.json`, que hoy tiene 20 valores a `null`.
+Esta fase la ejecuta el usuario en el teléfono. Las secciones 0, 2 y 3 son
+**solo lectura**: no escriben particiones ni cambian ajustes. Su objetivo es
+rellenar `hw/manaus.hw.json`, que hoy tiene 20 valores a `null`. La sección 1 es
+la excepción: explica el único paso que escribe (`boot_b`), y solo cuando exista
+un respaldo verificado.
 
 Si algo de esto falla, se para y se revisa: no hay prisa y no hay nada que
 "arreglar" con un flash.
@@ -27,31 +29,69 @@ bloquean el port:
 
 Guarda `getvar-all.txt` (contiene el serial: **no lo subas a git**).
 
-## 1. Go/no-go #1: ¿acepta `fastboot boot`?
+## 1. Go/no-go #1: `fastboot boot` — **RESUELTO: no existe**
 
-La duda más grande es si el LK de Motorola/MTK arranca un kernel desde RAM en
-vez de desde la partición `boot`. Se prueba con el `boot.img` **stock** que ya
-tienes, sin escribir nada:
+Probado el 2026-11-05: este LK **no implementa** `fastboot boot`. No es un
+fallo de permisos ni del cable: el comando no está en la lista del bootloader.
+Los datos completos (saneados) están en `hw/manaus.getvar.json`.
+
+Consecuencias, en orden:
+
+- **El kernel se arranca flasheando `boot`.** No hay forma de probar un kernel
+  sin escribir una partición. Eso hace que el respaldo de `boot` sea
+  obligatorio antes de M1, no opcional.
+- **La rollback por slot no sirve.** `getvar` dice `slot-successful:_a: no` y
+  `slot-retry-count:_a: 0`: si `boot_b` no arranca, el LK no tiene un slot `a`
+  sano al que caer. El único rollback fiable es tener el `boot_b` original.
+- `max-download-size` = 256 MiB: cualquier `boot.img` que empaquetemos tiene
+  que caber en una sola descarga (el nuestro son decenas de MiB, sin problema).
+
+### Qué hace falta antes de flashear nada
+
+Un `boot_b.img` original, verificado, en el PC. Vale cualquiera de estas vías:
+
+| Vía | Requisito | Comentario |
+| --- | --- | --- |
+| `dd` con root en Android | Magisk / KernelSU | `dd if=/dev/block/by-name/boot_b of=/sdcard/boot_b.img` |
+| `adb` en recovery | recovery con adb root | `adb shell dd if=/dev/block/by-name/boot_b of=/tmp/boot_b.img` y `adb pull` |
+| Firmware stock completo | descarga para XT2307-1 | Se extrae `boot.img` y sirve tanto de respaldo como de vuelta atrás |
+
+Comprobación del respaldo **antes** de usarlo:
 
 ```bash
-fastboot boot backup/boot.img
+# debe empezar por "ANDROID!" y llevar cabecera MTK v4 (magic 0x58881688)
+python3 ios-sweet/tools/unpack_bootv2.py boot_b.img /tmp/boot_unpacked
 ```
 
-- Si arranca Android normal: el LK sí soporta `fastboot boot`. Es el mejor
-  escenario y todo el bring-up se hace sin tocar `boot`.
-- Si contesta `FAILED (remote: 'unknown command')` o similar: no lo soporta.
-  Entonces el plan B es empaquetar con `tools/mkbootimg-manaus.sh`, flashear
-  `boot` y volver con `fastboot flash boot backup/boot.img`. Se decidirá
-  contigo antes de flashear nada.
-- Si se queda colgado: se fuerza apagado (botón 10 s) y arranca Android
-  normalmente. `fastboot boot` no modifica `boot`, así que no hay riesgo de
-  brick por esta prueba.
+Si no tienes ninguna de las tres vías, dímelo: la descarga del firmware
+`XT2307-1` es la más segura y no depende de root.
 
-Opcional, también informativo y no destructivo:
+### El día que toque flashear (M1)
 
 ```bash
-fastboot oem device-info     # algunos Motorola: estado de unlock
-fastboot getvar current-slot
+fastboot getvar current-slot          # debe decir b
+fastboot flash boot_b shim-boot.img   # solo boot_b, nunca boot_a ni bootloader
+fastboot reboot
+```
+
+- Si arranca XNU: objetivo de M1.
+- Si no arranca o se queda en el logo: apagar 10 s, `fastboot flash boot_b
+  boot_b.img` y volver a Android. Sin drama.
+- `secure: yes` con `securestate: flashing_unlocked` acepta imágenes sin firmar
+  (así se instalan ROMs en este teléfono). Si el LK rechazara el arranque por
+  verificación, el siguiente intento es `fastboot --disable-verity
+  --disable-verification flash vbmeta vbmeta.img` con un `vbmeta` vacío; se
+  decide entonces, no ahora.
+
+Los datos de `getvar` que sí sirven para el port (UFS Micron de 6 LUN con
+arranque en LUN 2, 8 GB LPDDR4X, `MT6879V_T/ZA`, baseband y build exactos)
+están en `hw/manaus.getvar.json`.
+
+Opcional, informativo y no destructivo:
+
+```bash
+fastboot oem device-info
+fastboot getvar partition-size:boot_b
 ```
 
 ## 2. Inventario completo (necesita root o recovery)

@@ -1,0 +1,56 @@
+{
+  "$comment": "Sanitized output of 'fastboot getvar all' on the real device (2026-11-05). Removed before committing: serialno, imei, imei2, esimid, iccid, uid, chipid[0..1], battid. Those stay out of git. Source of truth for the bootloader/partition facts below; hardware facts (GIC, UFS base, PMIC) come from the intake dump, not from here.",
+  "captured": "2026-11-05",
+  "via": "fastboot getvar all (bootloader mode, flashing_unlocked)",
+
+  "product": "manaus",
+  "board": "manaus",
+  "sku": "XT2307-1",
+  "carrier_sku": "XT2307-1",
+  "ro.carrier": "opencl",
+  "hwrev": "PVT",
+  "date": "10-24-2023",
+
+  "version-bootloader": "MBM-3.1-manaus_g_vext-d0417-V1TMS35H.3-45-1-decc9",
+  "secure": "yes",
+  "securestate": "flashing_unlocked",
+  "token": "inactive",
+  "iswarrantyvoid": "yes",
+  "frp-state": "no protection (0)",
+  "fdr-allowed": "yes",
+
+  "cpu": "MT6879V_T/ZA",
+  "storage-type": "ufs",
+  "ufs": "256GB MICRON MT256GAXAU4U2281 FV=0107 WB=3840",
+  "ram": "8GB MICRON LP4 DIE=32Gb M5=FF M6=07 M7=00 M8=18",
+
+  "ro.build.fingerprint": "motorola/manaus_g_sys/manaus:15/V1TMS35H.3-45-1/decc9-30d465:user/release-keys",
+  "ro.build.version.mtk": "alps-mp-s0.mp1.tc2sp2-V1.580",
+  "version-baseband": "MT6879_NR16.MP.V104.2.P31.02.269R",
+  "kernel.version": "Linux version 5.10.233-android12-9-00001-g3f8134695cb5-ab13232202 (Android clang 12.0.5, LLD 12.0.5) #1 SMP PREEMPT Mon Mar 17 01:55:38 UTC 2025",
+
+  "max-download-size": "268435456",
+  "max-sparse-size": "268435456",
+  "is-userspace": "no",
+  "snapshot-update-status": "none",
+
+  "slot-count": "2",
+  "slot-suffixes": "_a,_b",
+  "current-slot": "b",
+  "running-slot": "_b",
+  "running-boot-lun": "2",
+  "slot-successful:_a": "no",
+  "slot-successful:_b": "yes",
+  "slot-unbootable:_a": "no",
+  "slot-unbootable:_b": "no",
+  "slot-retry-count:_a": "0",
+  "slot-retry-count:_b": "1",
+
+  "fastboot_boot": "NOT SUPPORTED (LK rejects the command)",
+  "notes": [
+    "secure=yes + securestate=flashing_unlocked: unsigned images are accepted when flashing (that is how custom ROMs install on this device), but every write must be recoverable.",
+    "slot a is marked not-successful with retry 0 and slot b is the running one, so 'switch to the other slot' is NOT a reliable rollback here.",
+    "running-boot-lun=2 means the boot partition lives on UFS LUN 2, not LUN 0: by-name symlinks hide it, but the UFS work in M4 must not assume LUN 0 for boot.",
+    "max-download-size is 256 MiB: the packaged boot image must stay under that for a single fastboot download."
+  ]
+}
