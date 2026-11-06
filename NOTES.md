@@ -31,9 +31,14 @@ support `fastboot boot`; does LK leave a usable framebuffer; can UFS `userdata`
 be driven and host an HFS+ root. Without it `hw/manaus.hw.json` keeps its 20
 nulls and no `0004` machine-config override can be written.
 
-**Next action:** fill `hw/manaus.hw.json` from the intake, write
+**Next action:** the user runs `docs/manaus/05-TOMAR-DATOS.md` on the phone
+(read-only intake + optional zero-risk `fastboot boot backup/boot.img` test).
+Then fill `hw/manaus.hw.json` from the dump, write
 `xnu/patches-manaus/0004-sweet-machine-config.patch`, then M1 (kernel text on
 the panel) per `docs/manaus/04-M1.md`.
+
+**Do not** flash anything yet: `fastboot boot` with the stock image answers the
+LK question without touching `boot`.
 
 ---
 
