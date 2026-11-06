@@ -21,24 +21,36 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   (iig ABI), and publishes build errors + the kernel sha256 as public check-run
   annotations because Actions logs need a token.
 - Tooling built and validated (not yet used on hardware): `tools/mkadt-manaus.py`
-  (config-driven ADT; `--check` lists the 20 missing facts), `tools/mkbootimg-manaus.sh`
-  (MTK v2/v4 boot image), `tools/manaus-intake.sh` (read-only device inventory).
-- Docs: `docs/manaus/{00-FACTIBILIDAD,01-DELTA-HARDWARE,02-TRIAGE-DE-PARCHES,03-PLAN,04-M1}.md`.
+  (config-driven ADT; `--check` lists the 20 missing facts), `tools/manaus-intake.sh`
+  (read-only device inventory), `tools/bootimg.py` (boot/vendor_boot header
+  v0-v4 info+unpack, pure Python) and `tools/mkbootimg-manaus.sh` (v4 default,
+  v2 fallback). `bash tools/test-mkbootimg.sh` builds both layouts from random
+  bytes with the real mkbootimg and checks a byte-exact round-trip: green.
+- Facts from the real device (`fastboot getvar all`, sanitized in
+  `hw/manaus.getvar.json`): `XT2307-1`, PVT, MT6879V_T/ZA, 8 GB RAM, 256 GB
+  Micron UFS (boot on LUN 2), Android 15 / V1TMS35H.3-45-1, kernel 5.10.233,
+  `max-download-size` 256 MiB, current slot **b**, slot a *not* successful.
+- **`fastboot boot` does not exist in this LK** (probed 2026-11-05). A kernel
+  can only be started from a flashed partition, and slot `a` is not a safe
+  fallback. So: verified backup of `boot_b` + `vendor_boot_b` first, then flash.
+- Docs: `docs/manaus/{00-FACTIBILIDAD,01-DELTA-HARDWARE,02-TRIAGE-DE-PARCHES,03-PLAN,04-M1,05-TOMAR-DATOS}.md`.
 
-**Blocked on the user (M0):** run `tools/manaus-intake.sh` on the phone and send
-the sanitized `.tgz`. It answers the three go/no-go unknowns: does MTK LK
-support `fastboot boot`; does LK leave a usable framebuffer; can UFS `userdata`
-be driven and host an HFS+ root. Without it `hw/manaus.hw.json` keeps its 20
-nulls and no `0004` machine-config override can be written.
+**Blocked on the user (M0):** two things from the phone.
+1. `boot_b.img` and `vendor_boot_b.img` (root `dd`, recovery, or stock firmware
+   for XT2307-1) — needed as the restore path *and* because the MT6879 DTB for
+   M1 lives in `vendor_boot_b`.
+2. The sanitized intake `.tgz` from `tools/manaus-intake.sh` — fills the 20
+   nulls in `hw/manaus.hw.json` (GIC, timer, UFS base, PMIC, panel, touch).
+   Still open from it: does LK leave a usable framebuffer; can UFS `userdata`
+   host an HFS+ root.
 
-**Next action:** the user runs `docs/manaus/05-TOMAR-DATOS.md` on the phone
-(read-only intake + optional zero-risk `fastboot boot backup/boot.img` test).
-Then fill `hw/manaus.hw.json` from the dump, write
-`xnu/patches-manaus/0004-sweet-machine-config.patch`, then M1 (kernel text on
-the panel) per `docs/manaus/04-M1.md`.
+**Next action:** with those files, fill `hw/manaus.hw.json`, write
+`xnu/patches-manaus/0004-sweet-machine-config.patch`, then M1 per
+`docs/manaus/04-M1.md`. The exact user steps are in `docs/manaus/05-TOMAR-DATOS.md`.
 
-**Do not** flash anything yet: `fastboot boot` with the stock image answers the
-LK question without touching `boot`.
+**Do not** flash anything yet, and never `boot_a`/`vendor_boot_a`/`vbmeta`. The
+only vetted targets are `boot_b` and `vendor_boot_b`, after the backups above
+pass `tools/bootimg.py info`.
 
 ---
 

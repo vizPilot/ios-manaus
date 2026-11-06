@@ -59,33 +59,61 @@ Un `boot_b.img` original, verificado, en el PC. Vale cualquiera de estas vías:
 Comprobación del respaldo **antes** de usarlo:
 
 ```bash
-# debe empezar por "ANDROID!" y llevar cabecera MTK v4 (magic 0x58881688)
-python3 ios-sweet/tools/unpack_bootv2.py boot_b.img /tmp/boot_unpacked
+python3 ios-sweet/tools/bootimg.py info boot_b.img
+python3 ios-sweet/tools/bootimg.py info vendor_boot_b.img
 ```
+
+Tiene que salir `header_version 4`, `kernel_size` > 0 y (en `vendor_boot_b`)
+`dtb_size` > 0. Ese DTB es el que usa M1: no hay que buscarlo en otro sitio.
 
 Si no tienes ninguna de las tres vías, dímelo: la descarga del firmware
 `XT2307-1` es la más segura y no depende de root.
+
+### Sacar las imágenes stock con root o recovery
+
+```bash
+# Android con root (Magisk/KernelSU)
+adb shell su -c 'dd if=/dev/block/by-name/boot_b of=/sdcard/boot_b.img bs=4M'
+adb shell su -c 'dd if=/dev/block/by-name/vendor_boot_b of=/sdcard/vendor_boot_b.img bs=4M'
+adb pull /sdcard/boot_b.img
+adb pull /sdcard/vendor_boot_b.img
+
+# recovery (adb ya es root)
+adb shell dd if=/dev/block/by-name/boot_b of=/tmp/boot_b.img bs=4M
+adb shell dd if=/dev/block/by-name/vendor_boot_b of=/tmp/vendor_boot_b.img bs=4M
+adb pull /tmp/boot_b.img
+adb pull /tmp/vendor_boot_b.img
+```
+
+`by-name` resuelve al slot actual; `getvar` dice que es `b`. Comprueba con
+`sha256sum` que lo descargado coincide con lo que hay en el teléfono
+(`adb shell su -c 'sha256sum /dev/block/by-name/boot_b'`).
 
 ### El día que toque flashear (M1)
 
 ```bash
 fastboot getvar current-slot          # debe decir b
-fastboot flash boot_b shim-boot.img   # solo boot_b, nunca boot_a ni bootloader
+# modo v4 (el que usa el stock): dos particiones
+fastboot flash boot_b         shim-boot.img
+fastboot flash vendor_boot_b  shim-vendor_boot.img
 fastboot reboot
 ```
 
+Nunca `boot_a`, `vendor_boot_a`, `vbmeta`, `lk` ni `preloader`: el slot `a` no
+está sano (`slot-successful:_a: no`) y no sirve de red.
+
 - Si arranca XNU: objetivo de M1.
-- Si no arranca o se queda en el logo: apagar 10 s, `fastboot flash boot_b
-  boot_b.img` y volver a Android. Sin drama.
+- Si no arranca o se queda en el logo: apagar 10 s y restaurar **las dos**
+  particiones (`boot_b` y `vendor_boot_b`) con los `.img` del respaldo. Sin drama.
 - `secure: yes` con `securestate: flashing_unlocked` acepta imágenes sin firmar
   (así se instalan ROMs en este teléfono). Si el LK rechazara el arranque por
-  verificación, el siguiente intento es `fastboot --disable-verity
-  --disable-verification flash vbmeta vbmeta.img` con un `vbmeta` vacío; se
-  decide entonces, no ahora.
+  verificación, el siguiente intento sería un `vbmeta` vacío; `vbmeta` es
+  compartido entre slots, así que se decide entonces y con el respaldo delante,
+  no ahora.
 
-Los datos de `getvar` que sí sirven para el port (UFS Micron de 6 LUN con
-arranque en LUN 2, 8 GB LPDDR4X, `MT6879V_T/ZA`, baseband y build exactos)
-están en `hw/manaus.getvar.json`.
+Los datos de `getvar` que sí sirven para el port (UFS Micron, arranque en
+LUN 2, 8 GB de RAM, `MT6879V_T/ZA`, build y baseband exactos, 256 MiB de
+descarga máxima) están en `hw/manaus.getvar.json`.
 
 Opcional, informativo y no destructivo:
 
