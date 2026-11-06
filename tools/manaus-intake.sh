@@ -55,6 +55,12 @@ run 23-block-dev     'ls -l /dev/block 2>/dev/null | head -100'
 run 24-slot          'getprop ro.boot.slot_suffix; getprop ro.boot.verifiedbootstate; getprop ro.boot.flash.locked'
 run 25-ufs-sysfs     'for d in /sys/devices/platform/*ufs* /sys/bus/platform/drivers/ufshcd* /sys/class/scsi_host/*; do echo "== $d"; ls -l "$d" 2>/dev/null | head -30; done 2>/dev/null'
 run 26-proc-config   'cat /proc/config.gz 2>/dev/null | gzip -dc 2>/dev/null | grep -E "CONFIG_(MTK|UFS|SCSI_UFS|DRM|DRM_MEDIATEK|I2C_MT65XX|PINCTRL|MT635|PSTORE|RAMOOPS|SERIAL_8250)" | head -200'
+# CPU clocks (ADT clock-frequency) - cpufreq is readable without root on most builds.
+run 27-cpufreq       'for d in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do echo "== $d"; cat "$d/cpuinfo_max_freq" "$d/cpuinfo_min_freq" 2>/dev/null; done'
+# Panel geometry as the bootloader/Android leaves it (stride, bpp, smem).
+run 28-fb            'for d in /sys/class/graphics/fb*; do echo "== $d"; cat "$d/virtual_size" "$d/stride" "$d/bits_per_pixel" "$d/smem_start" "$d/modes" 2>/dev/null; done'
+# Boot image headers only (4 KiB each): MTK header v4, kernel base, dtb offset/size.
+run 29-bootimg-hdr   'for p in boot_a boot_b vendor_boot_a; do echo "== $p"; dd if=/dev/block/by-name/$p bs=4096 count=1 2>/dev/null | od -A x -t x1z | head -40; done'
 
 # Bundle it. Toybox tar supports -czf.
 if tar -czf "$OUT.tgz" -C "$(dirname "$OUT")" "$(basename "$OUT")" 2>/dev/null; then
