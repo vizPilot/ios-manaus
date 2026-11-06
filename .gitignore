@@ -8,3 +8,7 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# manaus port: intake bundles and build products
+hw/*.tgz
+*.simg
+*.adt

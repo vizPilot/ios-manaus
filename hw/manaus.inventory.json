@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "device": {
+    "name": "Motorola Edge 40 Neo",
+    "codename": "manaus",
+    "models": ["XT2307-1", "XT2307-2", "XT2307-3"],
+    "soc": "MediaTek MT6879 / Dimensity 7030",
+    "cpu": "2x Cortex-A78 2.5 GHz + 6x Cortex-A55 2.0 GHz",
+    "gpu": "ARM Mali-G610 MC3",
+    "ram": ["8 GB", "12 GB"],
+    "storage": "uMCP (UFS)",
+    "display": "6.55in pOLED 1080x2400 144 Hz",
+    "release": "2023-09"
+  },
+  "provenance": {
+    "sweet_facts_from": "dipa-studio/ios-sweet (tools/mkadt.py, NOTES.md, shim/)",
+    "manaus_public_from": [
+      "LineageOS wiki: manaus",
+      "LineageOS/android_device_motorola_mt6879-common BoardConfigCommon.mk",
+      "LineageOS/android_device_motorola_manaus BoardConfig.mk"
+    ],
+    "note": "Every null below must come from the live device tree or dmesg of THIS phone. Do not copy addresses from another MT6879 device."
+  },
+  "entries": {
+    "bootloader": {
+      "sweet": "ABL, fastboot boot de shim (nada flasheado)",
+      "manaus_value": null,
+      "how_to_measure": "fastboot getvar all; probar 'fastboot boot boot_stock.img'",
+      "confidence": "unknown",
+      "blocker": true
+    },
+    "boot_image_format": {
+      "sweet": "Android boot v2 + DTB, payload = shim + kernel + ADT + args",
+      "manaus_value": "Android boot header v4, BOARD_KERNEL_PAGESIZE=4096, base 0x3fff8000, dtb_offset 0x07c88000, ramdisk_offset 0x26f08000, cmdline bootopt=64S3,32N2,64N2, GKI + vendor_boot, A/B",
+      "how_to_measure": "BoardConfigCommon.mk + unpack_bootimg del boot.img stock",
+      "confidence": "medium (public build config)",
+      "blocker": true
+    },
+    "ram_banks": {
+      "sweet": ["0x80000000 size 2G", "0x1_00000000 size 0xfcc00000"],
+      "manaus_value": null,
+      "how_to_measure": "nodos memory@* y reserved-memory en /proc/device-tree",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "gic": {
+      "sweet": {"gicd": "0x17a00000", "gicr": "0x17a60000", "gicr_size": "0x100000"},
+      "manaus_value": null,
+      "how_to_measure": "interrupt-controller@* reg en el FDT",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "timer": {
+      "sweet": {"timebase_hz": 19200000, "virtual_timer_intid": 19},
+      "manaus_value": null,
+      "how_to_measure": "clock-frequency del CPU node; leer CNTFRQ_EL0 desde el shim",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "mpidr_topology": {
+      "sweet": "un cluster homogeneo, Aff1 = numero de nucleo",
+      "manaus_value": null,
+      "how_to_measure": "reg de cpu@* en el FDT + MPIDR_EL1 en runtime",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "page_size": {
+      "sweet": "16K verificado",
+      "manaus_value": null,
+      "how_to_measure": "MMFR0_EL1 (ID_AA64MMFR0_EL1) desde el shim; confirmar 16K en el TRM de A78/A55",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "framebuffer_handoff": {
+      "sweet": {"base": "0x9c000000", "size": "0x1700000", "geometry": "1080x2400 stride 1080*4", "splash": "continuo desde ABL"},
+      "manaus_value": null,
+      "how_to_measure": "chosen/bootargs, reserved-memory, nodo mtkfb/framebuffer, dmesg de LK; comprobar si el panel sigue encendido tras bootear recovery",
+      "confidence": "unknown",
+      "blocker": true
+    },
+    "ufs_host": {
+      "sweet": {"base": "0x01d84000", "size": "0x3000", "compatible": "qcom,ufshc"},
+      "manaus_value": null,
+      "how_to_measure": "nodo ufshc@*/ufs_mem en el FDT; dmesg 'ufshcd'; clocks/phys/regulators del nodo",
+      "confidence": "unknown",
+      "blocker": true
+    },
+    "userdata": {
+      "sweet": "HFS+ journaled dentro de userdata (se borra Android)",
+      "manaus_value": null,
+      "how_to_measure": "fstab.mt6879, tamano real de userdata, filesystem actual",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "touch": {
+      "sweet": {"controller": "Goodix GT9896", "bus": "GENI I2C 0xa84000", "irq": "gpio", "power": "RPMh LDO11"},
+      "manaus_value": null,
+      "how_to_measure": "/sys/bus/i2c/devices/*/name, nodo táctil del FDT (compatible, reg, interrupts, reset-gpio, vdd), dmesg",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "keys": {
+      "sweet": {"power": "PM6150 PON", "vol_up": "PM6150L GPIO2 (SPMI SID 4)", "vol_down": "PM6150 PON"},
+      "manaus_value": null,
+      "how_to_measure": "nodos key-* del FDT, PMIC real (MT6359/MT6369?), pwrap",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "pmic": {
+      "sweet": {"model": "PM6150/PM6150L", "bus": "SPMI + RPMh"},
+      "manaus_value": null,
+      "how_to_measure": "compatible de pwrap/pmic en el FDT; dmesg 'mt635'",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "battery": {
+      "sweet": "IOPMPowerSource estatico 100% + fuel gauge Qualcomm",
+      "manaus_value": null,
+      "how_to_measure": "/sys/class/power_supply/*/uevent; nodo charger/gauge del FDT",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "usb": {
+      "sweet": "DWC3 Qualcomm",
+      "manaus_value": null,
+      "how_to_measure": "nodo usb@*/musb/mtu3 del FDT; dmesg",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "uart": {
+      "sweet": "no hay (debug UART cableado como SPI)",
+      "manaus_value": null,
+      "how_to_measure": "nodos serial@* del FDT, pads de test, dmesg 'earlycon'/'console='",
+      "confidence": "unknown",
+      "blocker": false
+    },
+    "ramoops": {
+      "sweet": "no usado; log persistente propio en userdata (parche 0047)",
+      "manaus_value": null,
+      "how_to_measure": "reserved-memory ramoops/ramoops_region en el FDT y /sys/fs/pstore",
+      "confidence": "unknown",
+      "blocker": false
+    }
+  }
+}

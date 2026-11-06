@@ -1,0 +1,57 @@
+{
+  "$comment": "Machine facts for mkadt-manaus.py. Fill every null from the live FDT (tools/manaus-intake.sh). Do not copy addresses from another MT6879 device.",
+  "machine": "MANAUS",
+  "soc": "mt6879",
+  "soc_base": "0x01000000",
+  "root_compatible": ["D22AP", "iPhone10,3", "xiaomi,sweet", "motorola,manaus", "mediatek,mt6879", "AppleARM"],
+  "cpu_compatible": ["mediatek,mt6879", "ARM,v8"],
+
+  "cpus": [
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null },
+    { "mpidr": null, "clock_hz": null }
+  ],
+
+  "gic": {
+    "gicd": null,
+    "gicd_size": "0x10000",
+    "gicr": null,
+    "gicr_size": null,
+    "virtual_timer_intid": null
+  },
+
+  "timer": {
+    "timebase_hz": null
+  },
+
+  "ram": {
+    "base": null,
+    "size": null,
+    "panic_log_size": "0x100000"
+  },
+
+  "fb": {
+    "base": null,
+    "size": null,
+    "width": 1080,
+    "height": 2400,
+    "stride": null
+  },
+
+  "ufs": {
+    "base": null,
+    "size": null,
+    "compatible": "mediatek,ufshc"
+  },
+
+  "display": {
+    "scale": 3,
+    "canvas_width": 1125,
+    "canvas_height": 2436
+  }
+}

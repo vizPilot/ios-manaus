@@ -1,5 +1,11 @@
 # ios-sweet
 
+> **Branch `manaus` — porting workspace for the Motorola Edge 40 Neo
+> (MediaTek MT6879). Not a working port yet.** Start at
+> `docs/manaus/00-FACTIBILIDAD.md`. The shared patch series is untouched;
+> device overrides go in `xnu/patches-manaus/` and the build is
+> `.github/workflows/xnu-manaus.yml`.
+
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
