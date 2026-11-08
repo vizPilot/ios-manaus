@@ -86,9 +86,34 @@ cd xnu-src && git checkout -- . && for p in ../patches/*.patch; do git apply "$p
 git apply --check ../patches-manaus/0004-sweet-machine-config.patch
 ```
 
-## Estado actual
+## Estado actual (2026-11-08)
 
-Vacío a propósito: no se puede escribir `0004` sin los valores del FDT real
-(`hw/manaus.hw.json`). El primer parche que se añada aquí será
-`0004-sweet-machine-config.patch`, generado a partir de `hw/manaus.hw.json` y de
-`tools/mkadt-manaus.py`.
+Hay cuatro overrides, todos copias completas del parche base con los cambios
+indicados (nunca se aplican encima del base):
+
+| Override | Cambios |
+| --- | --- |
+| `0003-sweet-framebuffer-serial-console.patch` | `fbcon_probe()` prefiere `PE_current_console()`/`boot_args.Video` y solo cae al nodo ADT `sweet-fbcon` si `Video` viene vacío. LK elige el FB de splash en cada arranque. |
+| `0004-sweet-machine-config.patch` | `SWEET_VTIMER_INTID 19 -> 27`; stride de GICR por `GICR_TYPER.VLPIS` en runtime (`0x40000` GICv4 / `0x20000` GICv3) en `pe_fiq/find_gicr_pe_base()`, con `GICR_PE_SIZE_V3/V4` y `GICR_TYPER_VLPIS` en `SWEET.h`; comentarios MT6879. |
+| `0010-sweet-early-framebuffer-debug.patch` | `start.s` lee `BA_VIDEO_BASE/ROWBYTES/HEIGHT`; el mapeo V=P de 32 MiB usa el bloque que contiene el FB vivo (ya no `0x9c000000`); `genassym.c` publica esos offsets; `sweet_early_init(args)` en `arm_init()`. |
+| `0012-sweet-keep-debug-console-after-ttbr0.patch` | `sweet_early_map_final()` mapea el bloque de 32 MiB del FB vivo y `sweet_early_relocate()` mueve la consola al mismo offset dentro del alias VA del kernel; marcas 10–20; `arm_vm_init`/`arm_init`/`pe_serial`/`Makefile`. |
+
+Hecho de 16K: `ARM_TT_L2_SIZE = 0x2000000` (32 MiB). Tanto el banco de RAM
+(`0x140000000`) como el FB (`0xfe0d0000`) están por debajo de 64 GiB, así que
+comparten el L1 índice 0 del mapa V=P y el primer L2 sigue siendo
+`bootstrap_pagetables + 2*PGBYTES`; el FB ocupa el slot 127 y la RAM desde el
+160, sin solaparse. Un solo bloque de 32 MiB cubre los `0x1df0000` bytes del FB.
+
+Verificado sobre `xnu-8796.141.3`: `0001`–`0003`, override `0004`, `0005`–`0009`,
+override `0010`, `0011`, override `0012`, y después `0013`–`0081` aplican limpios
+(solo `0031`/`0041` necesitan `0026-stage-hfs.sh`). Los parches posteriores que
+tocan archivos del override (`0017` en `protos.h`, `0065` en `start.s`) no
+conflictúan.
+
+El stride de GICR **ya no** es una constante de compilación: se lee
+`GICR_TYPER.VLPIS` (bit 1) del primer redistribuidor en `pe_fiq` y en el shim,
+y se elige `0x40000` (GICv4) o `0x20000` (GICv3). El tamaño del `reg` del DT
+(`0x200000`) es sobre-provisión y no distingue las dos variantes.
+
+Pendiente antes de SMP: confirmar el `CurrentEL` de entrada. Nada de esto cambia
+la serie base.
