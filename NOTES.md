@@ -18,14 +18,17 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   and `0012` (live FB alias + relocation after TTBR0). With them the whole
   series `0004`–`0081` (minus 0031/0041) re-applies clean locally.
 - **CI works with Xcode 16.0** (macOS 14 runners were retired 2026-11-02, and
-  macos-15 no longer has Xcode 15.x). Two green runs: **42134881143** (commit
-  `339511a`, 8.8 min) and **42136147024** (commit `8b34cf5`, 12.5 min, arm64
-  queue). The second proves the kernel is real, published as a public
-  annotation because logs need a token:
-  `kernel.development.sweet 17188640 bytes
-  sha256=493f08ce3509ba43f6df96f1cb3828c82c3270e4f2ac1b34a105b40daf8be356`.
-  Artifacts: `xnu-manaus-kernel` (60.4 MB, includes symbols) and
-  `xnu-manaus-buildtree` (23.2 MB).
+  macos-15 no longer has Xcode 15.x). Three green runs: **42134881143** (commit
+  `339511a`, 8.8 min), **42136147024** (commit `8b34cf5`, 12.5 min, arm64
+  queue) and **42486570806** (commit `5a1df52`, the four overrides, 8.7 min).
+  The runs publish the real kernel as a public annotation because logs need a
+  token. The current one (overrides + runtime GICR stride):
+  `kernel.development.sweet 17188840 bytes
+  sha256=73b1ed3f4bc22499f4c1ac5c214a4a6db9603352ad336f6e6f5c0b736094b3b3`.
+  Previous (base series only): 17188640 bytes,
+  `sha256=493f08ce3509ba43f6df96f1cb3828c82c3270e4f2ac1b34a105b40daf8be356`.
+  Artifacts: `xnu-manaus-kernel` (includes symbols) and
+  `xnu-manaus-buildtree`.
 - Tooling built and validated (not yet used on hardware): `tools/mkadt-manaus.py`
   (config-driven ADT), `tools/manaus-intake.sh` (read-only device inventory),
   `tools/bootimg.py` (boot/vendor_boot header v0-v4 info+unpack, pure Python),
