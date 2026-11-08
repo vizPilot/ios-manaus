@@ -1,57 +1,204 @@
 {
-  "$comment": "Machine facts for mkadt-manaus.py. Fill every null from the live FDT (tools/manaus-intake.sh). Do not copy addresses from another MT6879 device.",
+  "$comment": "Machine facts for mkadt-manaus.py. Started 2026-11-05 from the vendor DTBs shipped in the XT2307-1 V1TM35H.3-45 firmware; CPU/GIC/timer/RAM/framebuffer/panel/touch/PMIC/GPIO/partition facts now come from the live device tree and /proc, collected by tools/manaus-intake.sh on 2026-11-07. Every value below carries its source in _facts. Guesses are marked as such (for example ufs.logical_block_assumed).",
   "machine": "MANAUS",
   "soc": "mt6879",
   "soc_base": "0x01000000",
   "root_compatible": ["D22AP", "iPhone10,3", "xiaomi,sweet", "motorola,manaus", "mediatek,mt6879", "AppleARM"],
-  "cpu_compatible": ["mediatek,mt6879", "ARM,v8"],
+  "cpu_compatible": ["qcom,kryo470", "arm,cortex-a55", "arm,cortex-a76", "ARM,v8"],
 
   "cpus": [
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null },
-    { "mpidr": null, "clock_hz": null }
+    { "mpidr": "0x000", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x100", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x200", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x300", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x400", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x500", "clock_hz": 2000000000, "core": "cortex-a55", "part": "0xd05" },
+    { "mpidr": "0x600", "clock_hz": 2500000000, "core": "cortex-a76", "part": "0xd41" },
+    { "mpidr": "0x700", "clock_hz": 2500000000, "core": "cortex-a76", "part": "0xd41" }
   ],
 
   "gic": {
-    "gicd": null,
-    "gicd_size": "0x10000",
-    "gicr": null,
-    "gicr_size": null,
-    "virtual_timer_intid": null
+    "$comment": "Live /interrupt-controller: compatible arm,gic-v3, #redistributor-regions=1, reg = GICD 0x0c000000+0x40000, GICR 0x0c040000+0x200000. The per-PE stride is NOT derived from the DT size: read GICR_TYPER.VLPIS (bit 1) at runtime, 0x40000 when set (GICv4) else 0x20000.",
+    "gicd": "0x0c000000",
+    "gicd_size": "0x40000",
+    "gicr": "0x0c040000",
+    "gicr_size": "0x200000",
+    "redistributor_regions": 1,
+    "gicr_pe_size_v3": "0x20000",
+    "gicr_pe_size_v4": "0x40000",
+    "gicr_pe_size_source": "GICR_TYPER.VLPIS bit 1, read at runtime in shim/find_gicr() and pe_fiq/find_gicr_pe_base()",
+    "virtual_timer_intid": 27
   },
 
   "timer": {
-    "timebase_hz": null
+    "timebase_hz": 13000000
   },
 
   "ram": {
-    "base": null,
-    "size": null,
-    "panic_log_size": "0x100000"
+    "$comment": "base/size are the single contiguous window handed to XNU as dram-base/dram-size (boot_args physBase/memSize). They are NOT the whole 8 GiB: XNU maps one contiguous range, so the window is the largest range that is top-level 'System RAM' with no reserved carve-out inside it. Live /proc/iomem, 2026-11-05.",
+    "base": "0x140000000",
+    "size": "0xa40f8000",
+    "ends_at": "0x1e40f8000",
+    "panic_log_size": "0x100000",
+    "dram_span": ["0x40000000", "0x23fffffff"],
+    "dram_span_size": "0x200000000",
+    "system_ram_total": "0x1de22c000",
+    "live_banks": [
+      ["0x40000000", "0x4807ffff"],
+      ["0x48180000", "0x481fffff"],
+      ["0x48400000", "0x48400fff"],
+      ["0x48402000", "0x6fffffff"],
+      ["0x74600000", "0x79ffffff"],
+      ["0x7a720000", "0x7b7fffff"],
+      ["0x7e800000", "0x7e8fffff"],
+      ["0x7fe00000", "0x7feaffff"],
+      ["0x7ffb0000", "0x7fffefff"],
+      ["0x80400000", "0x87ffffff"],
+      ["0x8c460000", "0x8dffffff"],
+      ["0x8e120000", "0x8e3fffff"],
+      ["0x8ec00000", "0x8ec9ffff"],
+      ["0x8f5a0000", "0x8f7fffff"],
+      ["0x90000000", "0x9f56efff"],
+      ["0x9ffff000", "0xbcffffff"],
+      ["0xbe400000", "0xbeffffff"],
+      ["0xbf800000", "0xbf8effff"],
+      ["0xc0000000", "0xcfffffff"],
+      ["0xd2dd0000", "0xd2ffffff"],
+      ["0xd3230000", "0xd3ffffff"],
+      ["0xdf0d0000", "0xed53ffff"],
+      ["0xee000000", "0xf7ffffff"],
+      ["0xf8880000", "0xfcffffff"],
+      ["0xfd280000", "0x13fffefff"],
+      ["0x140000000", "0x23fdfffff"],
+      ["0x23ff00000", "0x23fffefff"]
+    ]
   },
 
   "fb": {
-    "base": null,
-    "size": null,
+    "$comment": "Live /chosen values (2026-11-05). LK rewrites base/size on every boot; the shim reads them at runtime and sets boot_args.Video. These numbers are the build-time fallback and the ADT sweet-fbcon copy.",
+    "base": "0xfe0d0000",
+    "size": "0x1df0000",
     "width": 1080,
     "height": 2400,
-    "stride": null
+    "stride": 4320,
+    "panel": "nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv",
+    "panel_name": "csot_vtdr6115_655_1080x2400_c7",
+    "mblock": ["0xfe0d0000", "0x1f2f000"]
   },
 
   "ufs": {
-    "base": null,
-    "size": null,
-    "compatible": "mediatek,ufshc"
+    "$comment": "Live /proc/partitions + /dev/block/by-name (2026-11-05/07) and live /ufshci@112b0000. Patch 0028 finds a GPT partition by name on LUN 0, not the Android by-name node. sda/sdb are the UFS boot LUNs (preloader A/B, 4 MiB each); sdc is the main GPT and is assumed to be LUN 0 pending a direct SCSI read.",
+    "base": "0x112b0000",
+    "size": "0x2300",
+    "compatible": "mediatek,mt8183-ufshci",
+    "irq": 137,
+    "clocks": ["phy_sap", "phy_tx_sym0", "phy_rx_sym0", "phy_rx_sym1", "unipro_sys", "unipro_tick", "ufs_ck", "ufs_fde_ck", "ufs_tick", "ufs_fde", "ufs"],
+    "resets": ["unipro_rst", "crypto_rst", "hci_rst"],
+    "supplies": ["vcc_ufs2", "vcc_ufs3", "vccq", "vccq2"],
+    "qos": true,
+    "main_disk": "sdc",
+    "main_disk_kib": 249921536,
+    "partition": "userdata",
+    "partition_dev": "sdc90",
+    "partition_kib": 240787424,
+    "boot_luns": { "sda": "mmcblk0boot0", "sdb": "mmcblk0boot1" },
+    "boot_lun_labels": { "sda": "preloader_a", "sdb": "preloader_b" },
+    "running_boot_lun": 2,
+    "logical_block": 4096,
+    "logical_block_assumed": true
   },
 
   "display": {
     "scale": 3,
     "canvas_width": 1125,
-    "canvas_height": 2436
+    "canvas_height": 2436,
+    "panel_name": "csot_vtdr6115_655_1080x2400_c7",
+    "panel_compatible": "csot,vtdr6115,vdo,144hz,c7",
+    "lcmname": "nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv",
+    "refresh_hz": 144,
+    "dsi_base": "0x14017000",
+    "dsi_irq": 326,
+    "mipi_tx_base": "0x11e50000",
+    "reset_gpio": 97,
+    "pm_enable_gpios": [164, 166, 103, 165]
+  },
+
+  "gpio": {
+    "pinctrl_base": "0x10005000",
+    "gpio_count": 217,
+    "eint_base": "0x11e60000",
+    "eint_irq": 263,
+    "eint_pins": 237,
+    "iocfg": {
+      "lb": "0x11b00000",
+      "rm": "0x11c20000",
+      "rb": "0x11c40000",
+      "bm": "0x11d30000",
+      "br": "0x11d40000",
+      "lm": "0x11e10000",
+      "lt": "0x11e30000",
+      "rt": "0x11ec0000"
+    }
+  },
+
+  "uart": {
+    "uart0_base": "0x11001000",
+    "uart0_irq": 141,
+    "uart1_base": "0x11002000",
+    "uart1_irq": 142,
+    "compatible": "mediatek,mt6577-uart"
+  },
+
+  "pmic": {
+    "spmi_base": "0x1c804000",
+    "spmi_size": "0x8ff",
+    "spmi_eint": 233,
+    "main": "mt6363",
+    "main_sid": 4,
+    "i2c_base": "0x11ed1000",
+    "i2c_irq": 149,
+    "charger_gauge": "mt6375",
+    "charger_addr": "0x34",
+    "charger_eint": 3,
+    "keys": { "power_keycode": 116, "home_keycode": 114 }
+  },
+
+  "touch": {
+    "$comment": "mmi,status selects the controller against /chosen mmi,panel_name. This phone reports csot_vtdr6115, so focaltech,fts (spi3 CS1) binds; goodix,gt9916S (CS0) is the tianma variant.",
+    "active": "focaltech,fts",
+    "compatible": "focaltech,fts",
+    "spi_base": "0x11013000",
+    "spi_irq": 206,
+    "chip_select": 1,
+    "spi_max_hz": 12000000,
+    "reset_gpio": 159,
+    "irq_gpio": 22,
+    "vdd_gpio": 167,
+    "supply": "vtouch",
+    "max_raw_x": 17280,
+    "max_raw_y": 38400,
+    "alternative": {
+      "compatible": "goodix,gt9916S",
+      "chip_select": 0,
+      "reset_gpio": 159,
+      "irq_gpio": 22,
+      "avdd_gpio": 167
+    }
+  },
+
+  "_facts": {
+    "cpus": "Live /proc/cpuinfo + base.dts /cpus/cpu@000..101: MIDR part 0xd05 = Cortex-A55 for MPIDR 0x000..0x500 at 0x77359400 (2.0 GHz), part 0xd41 = Cortex-A76 for MPIDR 0x600/0x700 at 0x9502f900 (2.5 GHz). dtc labels cpu@100/@101 but reg is the MPIDR.",
+    "gic": "Live /interrupt-controller: compatible arm,gic-v3, #redistributor-regions=1, reg = <0 0xc000000 0 0x40000 0 0xc040000 0 0x200000> (GICD 0x0c000000+0x40000, GICR 0x0c040000+0x200000). The 2 MiB GICR region is over-provisioned and cannot distinguish GICv3 (0x20000/PE) from GICv4 (0x40000/PE), so both the shim and pe_fiq read GICR_TYPER.VLPIS (bit 1) on the first redistributor at runtime. /proc/interrupts confirms GICv3 and timer INTID 27. No platform GIC/GICR sysfs node exists on this kernel.",
+    "vtimer": "base.dts /timer: PPIs 13/14/11/10 -> virtual timer PPI 11 -> INTID 16+11 = 27 (standard ARM mapping, unlike sweet's Qualcomm 19).",
+    "timebase": "base.dts /timer: clock-frequency = 0xc65d40 = 13000000.",
+    "ram": "Live /proc/iomem from the phone (2026-11-05), not the vendor DT. The DRAM address span is 0x40000000-0x23fffffff (8 GiB); Android reports 0x1de22c000 (7.471 GiB) as top-level System RAM after its carve-outs, in 27 disjoint banks. base/size is the largest contiguous bank with no reserved child: 0x140000000 + 0xa40f8000, ending exactly at the first reserved carve-out (0x1e40f8000). XNU takes a single physBase/memSize, so the full fragmented map cannot be described to it; this window is above every low carve-out (kernel, modem, adsp, ramoops, splash FB at 0x7e605000) and is 2.56 GiB, close to the iPhone X's 3 GB. The panic log is carved from its top (0x1e40e8000..0x1e40f7fff). The old vendor-DTB window (0x40000000+0x3e605000) is not used: it overlaps where LK loads the boot kernel and the Android kernel/ramoops regions.",
+    "fb": "Live /chosen from fdt.dtb (2026-11-05): atag,videolfb-fb_base_l = 0xfe0d0000, atag,videolfb-fb_base_h = 0, atag,videolfb-vramSize = 0x1df0000, lcmname = nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv; /chosen mmi,panel_name = csot_vtdr6115_655_1080x2400_c7. The vendor DTB shipped with the firmware still says 0x7e605000 + 0x1be0000; LK rewrites both at boot, so the shim reads the live FDT in con_init() and sets boot_args.Video. The values in this file are only the fallback/ADT copy. /reserved-memory/mblock-16-framebuffer = 0xfe0d0000 + 0x1f2f000, and /proc/iomem reserves 0xfe0cf000-0xffffefff. Stride 1080*4 is assumed (no stride property in the DTB). The live vramSize fits three 4320-stride buffers with 0x46300 slack, but fits three 64-byte-aligned 4352-stride buffers almost exactly (0x1de2000 + 0xe000); if the console looks sheared on hardware, try 4352.",
+    "ufs": "Live /ufshci@112b0000: compatible mediatek,mt8183-ufshci, reg 0x112b0000+0x2300, interrupts <0 0x89 4> = SPI 137, clocks phy_sap/phy_tx_sym0/phy_rx_sym0/phy_rx_sym1/unipro_sys/unipro_tick/ufs_ck/ufs_fde_ck/ufs_tick/ufs_fde/ufs, resets unipro_rst/crypto_rst/hci_rst, supplies vcc_ufs2/vcc_ufs3/vccq/vccq2, mediatek,ufs-qos. The running kernel binds ufshcd-mtk (module ufs_mediatek_mod); CONFIG_SCSI_UFS_QCOM is not set. Live /proc/partitions: the main Android disk is sdc (249,921,536 KiB) with 91 GPT partitions; userdata is sdc90 (240,787,424 KiB = 229.7 GiB). /dev/block/by-name/userdata -> /dev/block/sdc90, so the GPT label is 'userdata' and patch 0028's name lookup matches. sda (mmcblk0boot0) and sdb (mmcblk0boot1) are the two 4 MiB UFS boot LUNs and carry preloader_a/preloader_b; fastboot getvar running-boot-lun=2 and the current slot is b, so the active preloader is on boot LUN B and the main GPT is sdc (assumed LUN 0). Android mounts userdata through dm-54 (f2fs + inlinecrypt); the SWEET driver reads raw sectors, so that layer is irrelevant. 4 KiB logical blocks are assumed (UFS class default), not measured.",
+    "uart": "base.dts /serial@11001000 and /serial@11002000: mediatek,mt6577-uart, IRQs 0x8d/0x8e (141/142). Not verified that a test point is accessible.",
+    "pmic": "base.dts /spmi@1c804000: mediatek,mt6879-spmi, reg pmif 0x1c804000+0x8ff, pmifmpu 0x1c804000+0x500, spmimst 0x1c801000+0x100, interrupt-parent pinctrl, interrupts <0xe9 4> = EINT 233. pmic@4 = mediatek,mt6363 (reg <4 0>, keys, regulators). The charger/gauge is mt6375@34 on i2c5 @0x11ed1000 (SPI 149), interrupt <3 8> = EINT 3. mt6363keys: power keycode 0x74 (116), home keycode 0x72 (114).",
+    "touch": "Live base.dts: both controllers sit on spi3@11013000 (SPI 206). goodix_ts_spi@0 = goodix,gt9916S (CS0, reset GPIO 159, IRQ GPIO 22, avdd GPIO 167) is gated by mmi,status containing tm_vtdr6115; focaltech@1 = focaltech,fts (CS1, reset GPIO 159, IRQ GPIO 22, vdd GPIO 167, 12 MHz) is gated by csot_vtdr6115. /chosen mmi,panel_name is csot_vtdr6115_655_1080x2400_c7, so focaltech is the bound controller. The IRQ is a GPIO/EINT, not a GIC SPI. Panel node panel2@0 = csot,vtdr6115,vdo,144hz,c7 on dsi@14017000 (SPI 326), MIPI TX @0x11e50000, reset GPIO 97, pm-enable GPIOs 164/166/103/165.",
+    "display": "Live /chosen: mmi,panel_name = csot_vtdr6115_655_1080x2400_c7, mmi,panel_vendor_id = 0x96150b08, atag,videolfb-lcmname = nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv (LK's panel driver name, 60 Hz), while the DT panel node advertises 144 Hz. Resolution 1080x2400. The DSI/panel is not driven by XNU in early bring-up; the splash framebuffer LK leaves behind is the only display path.",
+    "gpio": "base.dts /pinctrl: mediatek,mt6879-pinctrl, gpio @0x10005000, 217 pins (gpio-ranges 0xd9); iocfg banks lb 0x11b00000, rm 0x11c20000, rb 0x11c40000, bm 0x11d30000, br 0x11d40000, lm 0x11e10000, lt 0x11e30000, rt 0x11ec0000. /apirq@11e60000: mediatek,mt6983-eint, 4 instances (w 0x11e60000, e 0x11ce0000, s 0x11de0000, c 0x1c01e000), SPI 263, 237 pins.",
+    "cpu_compatible": "'qcom,kryo470' is kept first on purpose: xnu/patches/0018-sweet-boot-cpu-driver.patch matches IONameMatch 'qcom,kryo470'. It is a compatibility string in our ADT, not a hardware claim; the real cores are listed after it."
   }
 }

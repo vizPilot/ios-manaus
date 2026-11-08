@@ -40,7 +40,7 @@ de ningún tipo → no se puede iterar; parar y replantear (usar un `sweet`).
    arrancarlo. Alternativa: `vendor_boot`.
 4. Consola temprana en el FB de LK (0003/0010/0012 adaptados) con geometría
    1080×2400 y stride real.
-5. SMP: arrancar 1 núcleo, luego 6 A55, luego los 2 A78 (0065/0078).
+5. SMP: arrancar 1 núcleo, luego 6 A55, luego los 2 A76 (0065/0078).
 
 **Salida:** pantalla con texto del kernel y versión de XNU.
 

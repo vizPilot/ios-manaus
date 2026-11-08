@@ -1,10 +1,16 @@
 # 05 — Tomar los datos del teléfono (M0)
 
 Esta fase la ejecuta el usuario en el teléfono. Las secciones 0, 2 y 3 son
-**solo lectura**: no escriben particiones ni cambian ajustes. Su objetivo es
-rellenar `hw/manaus.hw.json`, que hoy tiene 20 valores a `null`. La sección 1 es
-la excepción: explica el único paso que escribe (`boot_b`), y solo cuando exista
-un respaldo verificado.
+**solo lectura**: no escriben particiones ni cambian ajustes. Su objetivo era
+rellenar `hw/manaus.hw.json`, que ya está **completo** (`python3
+tools/mkadt-manaus.py --check` sale 0). La sección 1 es la excepción: explica el
+único paso que escribe (`boot_b`), y solo cuando exista un respaldo verificado.
+
+> **Estado 2026-11-08:** los dos `manaus-intake` (2026-11-05 y 2026-11-07) ya
+> respondieron GIC, timer, RAM, FB, UFS, panel, táctil y PMIC. Solo queda **una
+> orden corta** para cerrar el storage (LUN principal y tamaño de bloque): ver
+> la sección 6. El resto de este documento queda como referencia de cómo se
+> obtuvieron los datos.
 
 Si algo de esto falla, se para y se revisa: no hay prisa y no hay nada que
 "arreglar" con un flash.
@@ -218,26 +224,57 @@ dump se queda fuera del repo.
 
 ## 4. Qué hago yo con el `.tgz`
 
-| Dato del dump | Campo de `hw/manaus.hw.json` |
-| --- | --- |
-| `device-tree/cpus/cpuN/reg` | `cpus[].mpidr` |
-| `27-cpufreq` (`cpuinfo_max_freq`) | `cpus[].clock_hz` |
-| `device-tree/interrupt-controller@*/reg` | `gic.gicd`, `gic.gicr`, `gic.gicr_size` |
-| `06-iomem` (GIC) | contraste de las dos anteriores |
-| `device-tree/timer/clock-frequency` | `timer.timebase_hz` |
-| `05-meminfo` + `06-iomem` (`System RAM`) | `ram.base`, `ram.size` |
-| `12-dmesg-hw` (`ufshcd`, `mtk-ufs`) | `ufs.reg`, `ufs.irq`, `ufs.ref_clk` |
-| `29-bootimg-hdr` | confirma `kernel_base`, offset del DTB |
-| `28-fb` | geometría real del panel (contraste con el ADT) |
+| Dato del dump | Campo de `hw/manaus.hw.json` | Valor obtenido |
+| --- | --- | --- |
+| `04-cpuinfo` + `device-tree/cpus/cpuN/reg` | `cpus[].mpidr`, `cpus[].part` | A55 `0xd05` 0x000–0x500, A76 `0xd41` 0x600/0x700 |
+| `27-cpufreq` (`cpuinfo_max_freq`) | `cpus[].clock_hz` | 2.0 GHz / 2.5 GHz |
+| `device-tree/interrupt-controller/reg` | `gic.gicd`, `gic.gicr`, `gic.gicr_size`, `gic.redistributor_regions` | GICD `0x0c000000`+`0x40000`, GICR `0x0c040000`+`0x200000`, 1 región |
+| `GICR_TYPER.VLPIS` (runtime) | `gic.gicr_pe_size_v3/v4` | stride `0x20000`/`0x40000`, se lee en cada arranque |
+| `device-tree/timer/clock-frequency` | `timer.timebase_hz` | 13 MHz; PPI 11 ⇒ INTID 27 |
+| `06-iomem` (`System RAM`) | `ram.base`, `ram.size`, `ram.live_banks` | `0x140000000`+`0xa40f8000` |
+| `device-tree/ufshci@112b0000` | `ufs.base/size/compatible/irq/clocks/resets/supplies` | `0x112b0000`+`0x2300`, `mediatek,mt8183-ufshci`, IRQ 137 |
+| `08-partitions` + `23-block-dev` | `ufs.main_disk`, `ufs.partition_dev`, `ufs.boot_luns` | `sdc`, `sdc90`, `sda`/`sdb` = preloader A/B |
+| `29-bootimg-hdr` | confirma `kernel_base`, offset del DTB | v4, DTB en `vendor_boot` |
+| `28-fb` + `/chosen` | `fb.base`, `fb.size`, `fb.panel_name` | `0xfe0d0000`+`0x1df0000` |
+| `device-tree` panel/touch/PMIC | `display.*`, `touch.*`, `pmic.*`, `gpio.*` | ver `_facts` de cada bloque |
 
-Con eso: `python3 tools/mkadt-manaus.py --check` debe salir 0, y escribo
-`xnu/patches-manaus/0004-sweet-machine-config.patch` con los valores de MT6879
-en vez de los de SM7150. Ese es el primer parche de verdad del port.
+Con eso: `python3 tools/mkadt-manaus.py --check` sale 0, y los overrides
+`0003`, `0004`, `0010` y `0012` de `xnu/patches-manaus/` llevan los valores de
+MT6879 en vez de los de SM7150.
 
 ## 5. Lo que no se puede saber desde el teléfono
 
-- Si el LK deja el framebuffer encendido y mapeado tras el handoff (solo se ve
-  arrancando el shim; por eso M1 empieza con consola por UART/`psci` y luego FB).
-- Si `userdata` (UFS) se puede hablar con el driver `sweet-ufs` portado a
-  `mtk-ufshc`. Depende de la versión de UFSHCI del MT6879; se ve en `12-dmesg-hw`
-  y en `25-ufs-sysfs`.
+- **Si el LK deja el framebuffer encendido y mapeado tras el handoff.** El FDT
+  vivo dice `islcmfound = 1` y LK reescribe `atag,videolfb-fb_base_l`, pero solo
+  se confirma arrancando el shim. Por eso `console.c` lee base/tamaño del FDT en
+  runtime y deja la consola desactivada si `boot_args.Video` viene vacío.
+- **Si `userdata` (UFS) responde con el driver `sweet-ufs` portado a
+  `ufshcd-mtk`.** El nodo DT y el driver Android están confirmados
+  (`mediatek,mt8183-ufshci`, `ufshcd-mtk`, `CONFIG_SCSI_UFS_QCOM` no puesto),
+  pero la compatibilidad de registros/vendor-init con el driver base
+  (derivado de Qualcomm) sigue sin probar. Es el mayor riesgo de M3.
+- **El `CurrentEL` de entrada.** `shim/start.S` no baja de EL2 a EL1; si el
+  primer arranque imprime `EL = 2`, ese es el siguiente cambio.
+
+## 6. Lo único que falta del teléfono (una orden, solo lectura)
+
+Para cerrar el storage hacen falta dos datos que no están en el intake:
+el **LUN** del disco principal (`sdc`) y el **tamaño de bloque lógico**. Con
+root:
+
+```bash
+adb shell su -c 'readlink -f /sys/block/sda /sys/block/sdb /sys/block/sdc; \
+  cat /sys/block/sdc/queue/logical_block_size /sys/block/sdc/queue/physical_block_size'
+```
+
+Interpretación:
+
+- `sda`/`sdb` deben resolver a los boot LUNs (`.../host0/.../target0:0:0/0:0:0:0/block/sda`
+  y `.../0:0:0:1/block/sdb` o similar). El `sdc` debe colgar de un `target` con
+  **LUN 0**; si no, se corrige `ufs.main_lun` en `hw/manaus.hw.json` y en el
+  driver.
+- `logical_block_size` 4096 confirma el valor asumido; si sale 512, el driver
+  tiene que usar ese tamaño para los accesos raw.
+
+No hay que escribir nada: es `readlink` + `cat`. Con eso, el storage queda
+cerrado y solo queda el primer arranque de hardware (con respaldos verificados).

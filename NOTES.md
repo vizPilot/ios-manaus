@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## 🔵 manaus (Motorola Edge 40 Neo, MT6879) - active fork handoff (2026-11-05)
+## 🔵 manaus (Motorola Edge 40 Neo, MT6879) - active fork handoff (2026-11-08)
 
 **Goal:** same kernel/userland approach as sweet, retargeted to `manaus`
-(MT6879, 2xA78 + 6xA55, Mali-G610, 1080x2400, UFS, A/B, unlocked bootloader).
+(MT6879, 2xA76 + 6xA55, Mali-G610, 1080x2400, UFS, A/B, unlocked bootloader).
 Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 (`origin` = fork, `upstream` = dipa-studio/ios-sweet). No `sweet_*` renames:
 `SWEET` is the name of the platform layer, not the device.
@@ -12,8 +12,11 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
   `xnu-8796.141.3`, verified locally (the only two that need the HFS staging
   script are 0031 and 0041; with `0026-stage-hfs.sh` staged they apply).
-- `xnu/patches-manaus/` is still empty on purpose (only README.md): no override
-  until the real MT6879 facts exist.
+- `xnu/patches-manaus/` now has **four overrides** (full copies of the base
+  patch, same filename, values changed): `0003` (live FB in the serial console),
+  `0004` (SWEET.h/GIC/timer/MT6879), `0010` (live FB in the V=P early mapping)
+  and `0012` (live FB alias + relocation after TTBR0). With them the whole
+  series `0004`–`0081` (minus 0031/0041) re-applies clean locally.
 - **CI works with Xcode 16.0** (macOS 14 runners were retired 2026-11-02, and
   macos-15 no longer has Xcode 15.x). Two green runs: **42134881143** (commit
   `339511a`, 8.8 min) and **42136147024** (commit `8b34cf5`, 12.5 min, arm64
@@ -24,36 +27,56 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   Artifacts: `xnu-manaus-kernel` (60.4 MB, includes symbols) and
   `xnu-manaus-buildtree` (23.2 MB).
 - Tooling built and validated (not yet used on hardware): `tools/mkadt-manaus.py`
-  (config-driven ADT; `--check` lists the 20 missing facts), `tools/manaus-intake.sh`
-  (read-only device inventory), `tools/bootimg.py` (boot/vendor_boot header
-  v0-v4 info+unpack, pure Python) and `tools/mkbootimg-manaus.sh` (v4 default,
-  v2 fallback). `bash tools/test-mkbootimg.sh` builds both layouts from random
-  bytes with the real mkbootimg and checks a byte-exact round-trip: green.
+  (config-driven ADT), `tools/manaus-intake.sh` (read-only device inventory),
+  `tools/bootimg.py` (boot/vendor_boot header v0-v4 info+unpack, pure Python),
+  `tools/mkbootimg-manaus.sh` (v4 default, v2 fallback) and `tools/dtbo.py`.
+  `bash tools/test-mkbootimg.sh` builds both layouts from random bytes with the
+  real mkbootimg and checks a byte-exact round-trip: green.
 - Facts from the real device (`fastboot getvar all`, sanitized in
-  `hw/manaus.getvar.json`): `XT2307-1`, PVT, MT6879V_T/ZA, 8 GB RAM, 256 GB
+  `hw/manaus.getvar.json`): `XT2307-1`, PVT1, MT6879V_T/ZA, 8 GB RAM, 256 GB
   Micron UFS (boot on LUN 2), Android 15 / V1TMS35H.3-45-1, kernel 5.10.233,
   `max-download-size` 256 MiB, current slot **b**, slot a *not* successful.
-- **`fastboot boot` does not exist in this LK** (probed 2026-11-05). A kernel
-  can only be started from a flashed partition, and slot `a` is not a safe
-  fallback. So: verified backup of `boot_b` + `vendor_boot_b` first, then flash.
+- **`fastboot boot` does not exist in this LK** (probed 2026-11-05); `fastboot
+  fetch` is rejected too. A kernel can only be started from a flashed partition,
+  and slot `a` is not a safe fallback. So: verified backup of `boot_b` +
+  `vendor_boot_b` first, then flash.
+- **Live intake answered the M0 questions** (two `manaus-intake` runs, 2026-11-05
+  and 2026-11-07): CPU parts `0xd05`/`0xd41`; GIC `arm,gic-v3` GICD
+  `0x0c000000`+`0x40000` / GICR `0x0c040000`+`0x200000`, `#redistributor-regions=1`,
+  timer 13 MHz PPI 11 ⇒ INTID 27; RAM window `0x140000000`+`0xa40f8000`; live FB
+  `0xfe0d0000`+`0x1df0000`; UFS `ufshci@112b0000` (`mediatek,mt8183-ufshci`,
+  IRQ 137), main GPT `sdc`, `userdata` = `sdc90` (229.7 GiB), boot LUNs `sda`/`sdb`
+  = preloader A/B; panel `csot,vtdr6115,vdo,144hz,c7`; touch focaltech `fts`
+  on spi3 CS1; PMIC mt6363 + mt6375. All in `hw/manaus.hw.json` with provenance.
+- **GICR stride is now runtime**: `GICR_TYPER.VLPIS` (bit 1) ⇒ `0x40000`
+  (GICv4) else `0x20000` (GICv3), read in both `shim/find_gicr()` and
+  `pe_fiq/find_gicr_pe_base()`. The DT region size alone is over-provisioned
+  and cannot distinguish them. Shim recompiled clean (`-Wall -Wextra`, 0 ABS64,
+  `out/Image` 16,080 B); host console render still writes `out/host.ppm`.
 - Docs: `docs/manaus/{00-FACTIBILIDAD,01-DELTA-HARDWARE,02-TRIAGE-DE-PARCHES,03-PLAN,04-M1,05-TOMAR-DATOS}.md`.
 
-**Blocked on the user (M0):** two things from the phone.
-1. `boot_b.img` and `vendor_boot_b.img` (root `dd`, recovery, or stock firmware
-   for XT2307-1) — needed as the restore path *and* because the MT6879 DTB for
-   M1 lives in `vendor_boot_b`.
-2. The sanitized intake `.tgz` from `tools/manaus-intake.sh` — fills the 20
-   nulls in `hw/manaus.hw.json` (GIC, timer, UFS base, PMIC, panel, touch).
-   Still open from it: does LK leave a usable framebuffer; can UFS `userdata`
-   host an HFS+ root.
+**Blocked before the first hardware boot:**
+1. **UFS bring-up is the main risk.** The base driver is Qualcomm-derived; the
+   MT6879 uses `mediatek,mt8183-ufshci` + MTK PHY/clocks/resets/regulators and
+   `ufshcd-mtk`. Register/vendor init compatibility is unverified. The main
+   disk is assumed **LUN 0** and logical block **4096 B** — both still need a
+   direct read (`/sys/block/sdc/device`, `.../queue/logical_block_size`).
+2. **CurrentEL is unknown.** `shim/start.S` has no EL2→EL1 drop; if the first
+   boot prints `EL = 2`, that transition is the next code change.
+3. First boot itself has not happened (needs verified `boot_b`/`vendor_boot_b`
+   backups and user confirmation).
 
-**Next action:** with those files, fill `hw/manaus.hw.json`, write
-`xnu/patches-manaus/0004-sweet-machine-config.patch`, then M1 per
-`docs/manaus/04-M1.md`. The exact user steps are in `docs/manaus/05-TOMAR-DATOS.md`.
+**Next action (in order):**
+1. Commit and push `origin/manaus` (overrides, shim, tools, hw facts, docs).
+2. Ask the user for the one short root command that settles LUN/block size:
+   `readlink -f /sys/block/sda /sys/block/sdb /sys/block/sdc` and
+   `cat /sys/block/sdc/queue/logical_block_size /sys/block/sdc/queue/physical_block_size`.
+3. After verified backups of `boot_b` + `vendor_boot_b`, first hardware boot and
+   report the `EL` line.
 
-**Do not** flash anything yet, and never `boot_a`/`vendor_boot_a`/`vbmeta`. The
-only vetted targets are `boot_b` and `vendor_boot_b`, after the backups above
-pass `tools/bootimg.py info`.
+**Do not** flash `boot_a`/`vendor_boot_a`/`vbmeta`/`lk`/`preloader`. The only
+vetted targets are `boot_b` and `vendor_boot_b`, after the backups above pass
+`tools/bootimg.py info`.
 
 ---
 
