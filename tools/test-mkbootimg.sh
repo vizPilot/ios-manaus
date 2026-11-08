@@ -36,7 +36,8 @@ bash "$HERE/mkbootimg-manaus.sh" "$WORK/shim.bin" "$WORK/payload.bin" \
      "$WORK/mt6879.dtb" "$WORK/out" --mode both >"$WORK/build.log" 2>&1 || {
         echo "FAIL: packager exited non-zero" >&2; tail -30 "$WORK/build.log" >&2; exit 1; }
 
-# v4 must keep the ramdisk out of boot.img and put it in vendor_boot.
+# v4 must carry the raw payload in BOTH ramdisks: boot.img's generic ramdisk
+# and vendor_boot's vendor ramdisk. The payload is not wrapped in a cpio.
 python3 "$HERE/bootimg.py" info "$WORK/out/v4/shim-boot.img" > "$WORK/v4-boot.txt"
 python3 "$HERE/bootimg.py" info "$WORK/out/v4/shim-vendor_boot.img" > "$WORK/v4-vb.txt"
 python3 "$HERE/bootimg.py" info "$WORK/out/v2/shim-boot.img" > "$WORK/v2-boot.txt"
@@ -46,11 +47,12 @@ check() {  # check FILE PATTERN MESSAGE
 }
 check "$WORK/v4-boot.txt" '^header_version *4$'          "v4 boot.img is not header v4"
 check "$WORK/v4-boot.txt" '^kernel_size *102400$'       "v4 boot.img kernel size wrong"
-check "$WORK/v4-boot.txt" '^ramdisk_size *0$'           "v4 boot.img must not carry a ramdisk"
+check "$WORK/v4-boot.txt" '^ramdisk_size *51200$'       "v4 boot.img must carry the raw payload"
 check "$WORK/v4-vb.txt"   '^dtb_size *40960$'           "v4 vendor_boot dtb size wrong"
-check "$WORK/v4-vb.txt"   '^vendor_ramdisk_size *[1-9]' "v4 vendor_boot ramdisk missing"
+check "$WORK/v4-vb.txt"   '^vendor_ramdisk_size *51200$' "v4 vendor_boot ramdisk must be the payload"
 check "$WORK/v2-boot.txt" '^header_version *2$'         "v2 boot.img is not header v2"
 check "$WORK/v2-boot.txt" '^dtb_size *40960$'           "v2 boot.img dtb missing"
+check "$WORK/v2-boot.txt" '^ramdisk_size *51200$'       "v2 boot.img ramdisk must be the payload"
 
 # Byte-for-byte round-trip (kernel, dtb, ramdisk).
 python3 "$HERE/bootimg.py" unpack "$WORK/out/v4/shim-boot.img" "$WORK/x/v4-boot" >/dev/null
@@ -64,6 +66,8 @@ same "$WORK/shim.bin" "$WORK/x/v4-boot/kernel"          "v4 boot kernel != shim"
 same "$WORK/shim.bin" "$WORK/x/v2-boot/kernel"          "v2 boot kernel != shim"
 same "$WORK/mt6879.dtb" "$WORK/x/v4-vb/dtb"             "v4 vendor_boot dtb != input"
 same "$WORK/mt6879.dtb" "$WORK/x/v2-boot/dtb"           "v2 boot dtb != input"
-same "$WORK/x/v4-vb/vendor_ramdisk" "$WORK/x/v2-boot/ramdisk" "ramdisk differs between v4 and v2"
+same "$WORK/payload.bin" "$WORK/x/v4-boot/ramdisk"      "v4 boot ramdisk != raw payload"
+same "$WORK/payload.bin" "$WORK/x/v4-vb/vendor_ramdisk" "v4 vendor ramdisk != raw payload"
+same "$WORK/payload.bin" "$WORK/x/v2-boot/ramdisk"      "v2 boot ramdisk != raw payload"
 
 echo "OK: mkbootimg-manaus.sh + bootimg.py round-trip clean"

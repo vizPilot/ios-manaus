@@ -172,7 +172,10 @@ def build(hw, qemu=False):
             ('compatible', b''.join(cstr(c) for c in (hw.get('cpu_compatible') or ['ARM,v8']))),
             ('reg', u32(mpidr)),
             ('cpu-id', u32(core)),
-            ('cluster-id', u32((mpidr >> 8) & 0xff)),
+            # One homogeneous SMP cluster, like sweet: ml_parse_cpu_topology
+            # uses cluster-type 0 (SMP), and patch 0078 already accepts the
+            # A55 (0x000-0x500) and A76 (0x600/0x700) MPIDRs as one set.
+            ('cluster-id', u32(0)),
             ('cluster-type', u32(0)),
             ('die-cluster-id', u32(0)),
             ('cluster-core-id', u32(core)),

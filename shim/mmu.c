@@ -72,7 +72,7 @@ static void zero_table(uint64_t *t)
 		t[i] = 0;
 }
 
-int mmu_enable(struct mmu_info *info)
+int mmu_enable(struct mmu_info *info, uint64_t fb_base, uint64_t fb_size)
 {
 	uintptr_t img_lo = (uintptr_t)_head & ~(PG_SIZE - 1);
 	uintptr_t img_hi = ((uintptr_t)_end + PG_SIZE - 1) & ~(PG_SIZE - 1);
@@ -90,8 +90,17 @@ int mmu_enable(struct mmu_info *info)
 	zero_table(l2);
 	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++)
 		l2[i] = (i << BLK_SHIFT) | DEV_FLAGS | D_BLOCK;
-	l2[FB_PHYS >> BLK_SHIFT] = (FB_PHYS & ~(BLK_SIZE - 1)) | NC_FLAGS | D_BLOCK;
-
+	/*
+	 * Normal non-cacheable (write-combining) for the live splash framebuffer.
+	 * It is not 32MB aligned and the carve-out can cross a block boundary
+	 * (manaus live: 0xfe0d0000 + 0x1df0000 = 0xffec0000), so mark every
+	 * block it touches. fb_base/fb_size come from /chosen, not a constant.
+	 */
+	if (fb_base && fb_size) {
+		for (uint64_t blk = fb_base >> BLK_SHIFT;
+		     blk <= (fb_base + fb_size - 1) >> BLK_SHIFT; blk++)
+			l2[blk] = (blk << BLK_SHIFT) | NC_FLAGS | D_BLOCK;
+	}
 	/* L3 for each block that holds part of the image */
 	for (uint64_t blk = img_lo >> BLK_SHIFT; blk <= (img_hi - 1) >> BLK_SHIFT; blk++) {
 		uint64_t *l3 = (uint64_t *)(pool + (1 + n_l3++) * PG_SIZE);

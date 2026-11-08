@@ -6,14 +6,19 @@
 # without a verified backup of boot_b (and vendor_boot_b for --mode v4).
 # See docs/manaus/05-TOMAR-DATOS.md.
 #
-# The stock device uses boot header v4 (GKI): kernel in `boot`, ramdisk in
-# `vendor_boot`, DTB in `vendor_boot`. Two layouts are produced:
+# The stock device uses boot header v4 (GKI): kernel in `boot`, generic ramdisk
+# in `boot`, vendor ramdisk + DTB in `vendor_boot`. Two layouts are produced:
 #
-#   v4  boot.img (shim as kernel, no ramdisk) + vendor_boot.img (payload as
-#       vendor ramdisk + mt6879.dtb). Same shape as stock: the LK path that the
-#       device uses every day. Writes *two* partitions.
+#   v4  boot.img = shim + PAYLOAD as its ramdisk; vendor_boot.img = PAYLOAD as
+#       vendor ramdisk + mt6879 dtb. Same shape as stock, plus the payload is
+#       duplicated so it works whichever ramdisk this LK publishes as
+#       /chosen/linux,initrd-start (the shim scans for the payload magic).
 #   v2  single boot.img with kernel + ramdisk + dtb (what sweet uses). Only one
 #       partition to write, but not a layout this LK is known to exercise.
+#
+# The ramdisk is the *raw* payload (tools/mkpayload.py), exactly like sweet.
+# Do NOT wrap it in a cpio: shim/loader.c reads the payload header directly,
+# and the bootloader does not decompress the ramdisk before handing it over.
 #
 # AOSP mkbootimg silently ignores --dtb/--dtb_offset/--pagesize for header v4
 # (checked against mkbootimg.py from system/tools/mkbootimg): the DTB really
@@ -42,7 +47,9 @@ KERNEL_OFF=0x00008000
 TAGS_OFF=0x07c88000
 RAMDISK_OFF=0x26f08000
 PAGESIZE=4096
-CMDLINE="bootopt=64S3,32N2,64N2 console=null"
+# Stock split: empty boot.img cmdline, MTK boot options in vendor_boot.
+CMDLINE_BOOT=""
+CMDLINE_VENDOR="bootopt=64S3,32N2,64N2 loglevel=4"
 
 command -v mkbootimg >/dev/null || {
 	echo "mkbootimg not found (apt install mkbootimg / pip install mkbootimg)" >&2
@@ -54,33 +61,28 @@ command -v mkbootimg >/dev/null || {
 
 mkdir -p "$OUT"
 
-# newc cpio is what LK expects to hand over as initrd.
-(cd "$(dirname "$PAYLOAD")" && echo "$(basename "$PAYLOAD")" | cpio -o -H newc --quiet | gzip -9) > "$OUT/payload.cpio.gz"
-PAYLOAD_SIZE=$(wc -c < "$OUT/payload.cpio.gz")
-[ "$PAYLOAD_SIZE" -gt 1024 ] || { echo "payload cpio looks empty" >&2; exit 1; }
-
-mk_boot() {
+mk_boot() {  # mk_boot HEADER CMDLINE [extra mkbootimg args...]
 	set -x
 	mkbootimg --header_version "$1" --kernel "$SHIM" \
 		--base "$BASE" --kernel_offset "$KERNEL_OFF" --ramdisk_offset "$RAMDISK_OFF" \
 		--tags_offset "$TAGS_OFF" --dtb_offset "$TAGS_OFF" --pagesize "$PAGESIZE" \
-		--os_version 13.0.0 --os_patch_level 2035-06 --cmdline "$CMDLINE" "${@:2}"
+		--os_version 13.0.0 --os_patch_level 2035-06 --cmdline "$2" "${@:3}"
 	set +x
 }
 
 case "$MODE" in
 v4)
-	# boot.img: kernel only (v4 ignores --dtb). vendor_boot: ramdisk + dtb.
-	mk_boot 4 -o "$OUT/shim-boot.img"
-	printf 'androidboot.selinux=permissive\n' > "$OUT/bootconfig"
+	# Header v4 ignores the dtb: boot.img carries shim + payload, vendor_boot
+	# carries payload + dtb. No bootconfig: stock has bootconfig_size 0.
+	mk_boot 4 "$CMDLINE_BOOT" --ramdisk "$PAYLOAD" -o "$OUT/shim-boot.img"
 	mkbootimg --vendor_boot "$OUT/shim-vendor_boot.img" --header_version 4 \
-		--vendor_ramdisk "$OUT/payload.cpio.gz" --dtb "$DTB" \
-		--vendor_bootconfig "$OUT/bootconfig" --pagesize "$PAGESIZE" \
-		--vendor_cmdline "$CMDLINE"
+		--vendor_ramdisk "$PAYLOAD" --dtb "$DTB" \
+		--pagesize "$PAGESIZE" --vendor_cmdline "$CMDLINE_VENDOR"
 	IMAGES="$OUT/shim-boot.img $OUT/shim-vendor_boot.img"
 	;;
 v2)
-	mk_boot 2 --ramdisk "$OUT/payload.cpio.gz" --dtb "$DTB" -o "$OUT/shim-boot.img"
+	mk_boot 2 "$CMDLINE_VENDOR" --ramdisk "$PAYLOAD" --dtb "$DTB" \
+		-o "$OUT/shim-boot.img"
 	IMAGES="$OUT/shim-boot.img"
 	;;
 both)
@@ -107,11 +109,12 @@ if [ -n "${IMAGES:-}" ]; then
 	cat <<EOF
 
 The header above is the truth: header_version, kernel_size, ramdisk_size and
-dtb_size must all be non-zero except ramdisk_size for v4 boot.img (v4 keeps the
-ramdisk in vendor_boot).
+dtb_size must all be non-zero. The payload is duplicated on purpose: v4 boot.img
+and v4 vendor_boot both carry the same raw payload, so the shim finds it in
+whichever ramdisk LK advertises as linux,initrd-start. It is not a cpio.
 
-Next (docs/manaus/05-TOMAR-DATOS.md, section 4): with boot_b.img backed up and
-checked with tools/bootimg.py,
+Next (docs/manaus/05-TOMAR-DATOS.md, section 4): with boot_b.img and
+vendor_boot_b.img backed up and checked with tools/bootimg.py,
 EOF
 	case "$MODE" in
 	v4)

@@ -1,10 +1,14 @@
 /*
  * Milestone 2: one boot answers the questions that decide the XNU port.
  *   - CPU feature registers (16K granule, GIC sysreg interface)
- *   - PSCI/SMCCC version and which PSCI calls the Qualcomm TZ offers
+ *   - PSCI/SMCCC version and which PSCI calls the firmware offers
  *   - SMP: PSCI CPU_ON for the 7 secondaries, each reports its MPIDR
- *   - GICv3 Group 1 IRQ from the virtual timer (INTID 19 on Qualcomm)
+ *   - GICv3 Group 1 IRQ from the virtual timer (INTID 27 on MT6879)
  * Any unexpected exception paints a blue panic screen.
+ *
+ * Retargeted to Motorola Edge 40 Neo (manaus, MediaTek MT6879): GICD/GICR,
+ * the architected timer PPIs and the timer frequency come from the vendor DTB
+ * in vendor_boot.img, see hw/manaus.hw.json.
  */
 #include <stdint.h>
 #include "console.h"
@@ -12,15 +16,19 @@
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
-#define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
-
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
-#define GICR_PE_SIZE		0x20000UL
+#define GICD_BASE		0x0c000000UL
+#define GICR_BASE		0x0c040000UL
+#define GICR_SIZE		0x200000UL
+/*
+ * GICv3 redistributors are 128 KiB each; GICv4 (VLPIS set in GICR_TYPER)
+ * adds a 128 KiB VLPI frame, so each PE occupies 256 KiB. The DT reg size
+ * cannot tell them apart (it may be over-provisioned), so the stride is
+ * read at runtime from GICR_TYPER.VLPIS in find_gicr().
+ */
+#define GICR_PE_SIZE_V3		0x20000UL
+#define GICR_PE_SIZE_V4		0x40000UL
 #define GICR_TYPER		0x08
+#define GICR_TYPER_VLPIS	(1ULL << 1)
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
 #define GICR_IGROUPR0		(GICR_SGI + 0x080)
@@ -30,8 +38,8 @@
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
-#define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
-#define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
+#define VTIMER_INTID		27	/* DT: <GIC_PPI 11 ...>, ARM standard */
+#define PTIMER_INTID		30	/* DT: <GIC_PPI 14 ...> */
 #define SGI_INTID		1
 
 #define PSCI_VERSION		0x84000000UL
@@ -106,10 +114,8 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
-	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
-	__asm__ volatile("dsb sy" ::: "memory");
+	/* MT6879 firmware exposes PSCI SYSTEM_RESET (the DT has a psci node). */
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-	wr32(PSHOLD, 0);
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -174,7 +180,7 @@ void secondary_main(uint64_t idx)
 			sec_probe[0] = rd32(r + GICR_IGROUPR0);
 			wr32(r + GICR_IGROUPR0, 0xffffffff);
 			sec_probe[1] = rd32(r + GICR_IGROUPR0);
-			wr8(r + GICR_IPRIORITYR + 19, 0xa0);
+			wr8(r + GICR_IPRIORITYR + VTIMER_INTID, 0xa0);
 			sec_probe[2] = rd32(r + GICR_IPRIORITYR + 16);
 		}
 		sec_probe[3] = r ? 1 : 0xdead;
@@ -209,8 +215,10 @@ static uintptr_t find_gicr(void)
 {
 	uint64_t aff = rsr("mpidr_el1");
 	uint32_t want = (aff & 0xffffff) | ((aff >> 8) & 0xff000000);
+	uintptr_t stride = (rd64(GICR_BASE + GICR_TYPER) & GICR_TYPER_VLPIS)
+	    ? GICR_PE_SIZE_V4 : GICR_PE_SIZE_V3;
 
-	for (uintptr_t off = 0; off < GICR_SIZE; off += GICR_PE_SIZE) {
+	for (uintptr_t off = 0; off < GICR_SIZE; off += stride) {
 		uint64_t typer = rd64(GICR_BASE + off + GICR_TYPER);
 		if ((uint32_t)(typer >> 32) == want)
 			return GICR_BASE + off;
@@ -367,17 +375,26 @@ static uint64_t ticks_mem(void)
 
 static uint32_t to_us(uint64_t ticks)
 {
-	return ticks * 10 / 192;	/* 19.2 MHz */
+	return ticks / 13;	/* 13 MHz (0xc65d40 in the vendor DTB) */
 }
 
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
+	struct fb_info fb;
+
+	/* LK rewrites the splash framebuffer address on every boot. */
+	stage = "con_init";
+	con_init(dtb);
+	con_fb_get(&fb);
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-	con_str("SHIM", "sweet milestone 4: xnu loader");
+	con_str("SHIM", "manaus milestone 1: xnu loader");
+	con_hex("EL", rsr("currentel") >> 2);	/* 1 = EL1, 2 = EL2 (see 04-M1) */
+	con_hex("FBBASE", fb.base);
+	con_hex("FBSIZE", fb.size);
 	con_skip();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
@@ -397,7 +414,7 @@ void shim_main(uint64_t dtb)
 	uint64_t mem_off = ticks_mem();
 
 	stage = "mmu enable";
-	int rc = mmu_enable(&mi);
+	int rc = mmu_enable(&mi, fb.base, fb.size);
 
 	stage = "fill on";
 	uint64_t fill_on = rc ? 0 : ticks_fill(RED);
@@ -417,7 +434,7 @@ void shim_main(uint64_t dtb)
 	con_hex2("PARANGE", "mmfr0=", rsr("id_aa64mmfr0_el1") & 0xf, "tg16=", (rsr("id_aa64mmfr0_el1") >> 20) & 0xf);
 	con_skip();
 	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
-	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));
+	con_hex("PAR fb", mmu_probe(fb.base + 0x1000));
 	con_hex("PAR gic", mmu_probe(GICD_BASE));
 	con_hex("PAR 12G", mmu_probe(0x300000000UL));
 	con_skip();
