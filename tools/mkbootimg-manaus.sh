@@ -75,8 +75,14 @@ v4)
 	# Header v4 ignores the dtb: boot.img carries shim + payload, vendor_boot
 	# carries payload + dtb. No bootconfig: stock has bootconfig_size 0.
 	mk_boot 4 "$CMDLINE_BOOT" --ramdisk "$PAYLOAD" -o "$OUT/shim-boot.img"
+	# Same base/offsets as boot.img so the vendor_boot header carries the stock
+	# addresses (kernel 0x40000000, ramdisk 0x66f00000, tags/dtb 0x47c80000).
+	# LK loads the vendor ramdisk at ramdisk_addr, so these are not cosmetic.
 	mkbootimg --vendor_boot "$OUT/shim-vendor_boot.img" --header_version 4 \
 		--vendor_ramdisk "$PAYLOAD" --dtb "$DTB" \
+		--base "$BASE" --kernel_offset "$KERNEL_OFF" \
+		--ramdisk_offset "$RAMDISK_OFF" --tags_offset "$TAGS_OFF" \
+		--dtb_offset "$TAGS_OFF" \
 		--pagesize "$PAGESIZE" --vendor_cmdline "$CMDLINE_VENDOR"
 	IMAGES="$OUT/shim-boot.img $OUT/shim-vendor_boot.img"
 	;;

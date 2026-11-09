@@ -50,6 +50,11 @@ check "$WORK/v4-boot.txt" '^kernel_size *102400$'       "v4 boot.img kernel size
 check "$WORK/v4-boot.txt" '^ramdisk_size *51200$'       "v4 boot.img must carry the raw payload"
 check "$WORK/v4-vb.txt"   '^dtb_size *40960$'           "v4 vendor_boot dtb size wrong"
 check "$WORK/v4-vb.txt"   '^vendor_ramdisk_size *51200$' "v4 vendor_boot ramdisk must be the payload"
+# LK loads the vendor ramdisk at ramdisk_addr: these must be the stock addresses.
+check "$WORK/v4-vb.txt"   '^kernel_addr *0x40000000$'   "v4 vendor_boot kernel_addr not stock"
+check "$WORK/v4-vb.txt"   '^ramdisk_addr *0x66f00000$'  "v4 vendor_boot ramdisk_addr not stock"
+check "$WORK/v4-vb.txt"   '^tags_addr *0x47c80000$'     "v4 vendor_boot tags_addr not stock"
+check "$WORK/v4-vb.txt"   '^dtb_addr *0x47c80000$'      "v4 vendor_boot dtb_addr not stock"
 check "$WORK/v2-boot.txt" '^header_version *2$'         "v2 boot.img is not header v2"
 check "$WORK/v2-boot.txt" '^dtb_size *40960$'           "v2 boot.img dtb missing"
 check "$WORK/v2-boot.txt" '^ramdisk_size *51200$'       "v2 boot.img ramdisk must be the payload"

@@ -4,8 +4,9 @@
  * Runs with the MMU off (all memory Device, so DMA is coherent with no cache
  * maintenance). Dumps the UFSHCI registers ABL left behind and, if the host
  * is enabled and the link is up, points the transfer request list at our own
- * buffers and issues READ-ONLY SCSI commands on LUN 0. Nothing is ever
- * written to the device: there is no SCSI WRITE in this file.
+ * buffers and issues READ-ONLY SCSI commands on LUN 2 (the main GPT; on MTK
+ * LUN 0/1 are the preloader boot LUNs). Nothing is ever written to the device:
+ * there is no SCSI WRITE in this file.
  *
  * Register layout and descriptor formats: JEDEC UFSHCI (JESD223).
  */
@@ -13,7 +14,8 @@
 #include "console.h"
 #include "ufs.h"
 
-#define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
+#define UFS_BASE	0x112b0000UL	/* ufshci@112b0000, manaus live FDT */
+#define UFS_LUN		2		/* sdc = 0:0:0:2 (measured 2026-11-08) */
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
@@ -139,7 +141,7 @@ static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
 	uint32_t ocs, st;
-	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+	return scsi(UFS_LUN, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
 }
 
 static uint64_t le64(const uint8_t *p)
@@ -232,21 +234,21 @@ void test_ufs(void)
 	static const uint8_t tur[6] = { 0x00 };
 	/* A first command may report a unit attention; retry a few times. */
 	for (int i = 0; i < 3; i++) {
-		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st);
+		rc = scsi(UFS_LUN, tur, sizeof(tur), 0, 0, &ocs, &st);
 		con_hex2("UFS TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
 		if (!rc)
 			break;
 	}
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
-	rc = scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st);
+	rc = scsi(UFS_LUN, cap10, sizeof(cap10), data, 8, &ocs, &st);
 	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (!rc)
-		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
+		con_hex2("UFS LUN2", "lastlba=", be32(data), "blk=", be32(data + 4));
 
 	/* READ(10) LBA 0, 2 blocks: protective MBR and the GPT header. */
 	static const uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
-	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
+	rc = scsi(UFS_LUN, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
 	con_hex2("UFS READ", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (rc)
 		return;

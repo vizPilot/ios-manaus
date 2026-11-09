@@ -79,9 +79,17 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
    `0028` and `hw/manaus.hw.json` updated.
 3. ~~Backups~~ **done** (2026-11-08): device `boot_b` + `vendor_boot_b` dumped,
    pulled and hash-verified (`bbc67027...` / `dc77a358...`), stock DTBO saved.
-4. **Stage shim-only v4 images** and ask the user to confirm flashing
-   `boot_b` + `vendor_boot_b`. Report the shim's `EL`, `FBBASE`, `FBSIZE`,
-   `LOADER` and `UFS` lines.
+4. **Shim-only v4 images staged** (2026-11-08) in `shim/out/first-boot/`:
+   `shim-boot.img` (188,416 B,
+   `sha256=e6ee2194...187a94`) and `shim-vendor_boot.img` (262,144 B,
+   `sha256=62c6f3de...e0c0e9`). Kernel is `shim/out/Image` (180,224 B, no
+   payload: 4096 zero bytes as ramdisk); the vendor DTB is the stock
+   249,100-byte DTBO, byte-identical. Header addresses now match stock
+   (`kernel 0x40000000`, `ramdisk 0x66f00000`, `tags/dtb 0x47c80000`).
+   `shim/ufs.c` was pointing at sweet's UFS (`0x01d84000`, LUN 0); it now uses
+   manaus `0x112b0000` and LUN 2, so the no-payload probe is safe and relevant.
+5. Ask the user to confirm flashing `boot_b` + `vendor_boot_b`, then report the
+   shim's `EL`, `FBBASE`, `FBSIZE`, `LOADER` and `UFS` lines.
 
 **Do not** flash `boot_a`/`vendor_boot_a`/`vbmeta`/`lk`/`preloader`. The only
 vetted targets are `boot_b` and `vendor_boot_b`, after the backups above pass
