@@ -1,5 +1,5 @@
 {
-  "$comment": "Machine facts for mkadt-manaus.py. Started 2026-11-05 from the vendor DTBs shipped in the XT2307-1 V1TM35H.3-45 firmware; CPU/GIC/timer/RAM/framebuffer/panel/touch/PMIC/GPIO/partition facts now come from the live device tree and /proc, collected by tools/manaus-intake.sh on 2026-11-07. Every value below carries its source in _facts. Guesses are marked as such (for example ufs.logical_block_assumed).",
+  "$comment": "Machine facts for mkadt-manaus.py. Started 2026-11-05 from the vendor DTBs shipped in the XT2307-1 V1TM35H.3-45 firmware; CPU/GIC/timer/RAM/framebuffer/panel/touch/PMIC/GPIO/partition facts come from the live device tree, /proc and root-only sysfs reads collected by tools/manaus-intake.sh and direct queries on 2026-11-07/08. Every value below carries its source in _facts. The UFS main LUN and logical block size are now measured, not assumed.",
   "machine": "MANAUS",
   "soc": "mt6879",
   "soc_base": "0x01000000",
@@ -87,7 +87,7 @@
   },
 
   "ufs": {
-    "$comment": "Live /proc/partitions + /dev/block/by-name (2026-11-05/07) and live /ufshci@112b0000. Patch 0028 finds a GPT partition by name on LUN 0, not the Android by-name node. sda/sdb are the UFS boot LUNs (preloader A/B, 4 MiB each); sdc is the main GPT and is assumed to be LUN 0 pending a direct SCSI read.",
+    "$comment": "Measured 2026-11-08 with root on the device (read-only). The main GPT is LUN 2, not LUN 0: /sys/block/sdc resolves to SCSI 0:0:0:2 and its sector at 0x1000 (LBA 1 with 4 KiB blocks) is 'EFI PART'. LUN 0 and LUN 1 are the 4 MiB preloader boot LUNs (sda/sdb, UFS_BOOT magic). number_of_luns=3, logical_block_size=4096. Patch 0028's override targets LUN 2.",
     "base": "0x112b0000",
     "size": "0x2300",
     "compatible": "mediatek,mt8183-ufshci",
@@ -97,6 +97,7 @@
     "supplies": ["vcc_ufs2", "vcc_ufs3", "vccq", "vccq2"],
     "qos": true,
     "main_disk": "sdc",
+    "main_lun": 2,
     "main_disk_kib": 249921536,
     "partition": "userdata",
     "partition_dev": "sdc90",
@@ -104,8 +105,10 @@
     "boot_luns": { "sda": "mmcblk0boot0", "sdb": "mmcblk0boot1" },
     "boot_lun_labels": { "sda": "preloader_a", "sdb": "preloader_b" },
     "running_boot_lun": 2,
+    "number_of_luns": 3,
+    "boot_lun_enabled": "0x02",
     "logical_block": 4096,
-    "logical_block_assumed": true
+    "logical_block_assumed": false
   },
 
   "display": {
@@ -193,7 +196,7 @@
     "timebase": "base.dts /timer: clock-frequency = 0xc65d40 = 13000000.",
     "ram": "Live /proc/iomem from the phone (2026-11-05), not the vendor DT. The DRAM address span is 0x40000000-0x23fffffff (8 GiB); Android reports 0x1de22c000 (7.471 GiB) as top-level System RAM after its carve-outs, in 27 disjoint banks. base/size is the largest contiguous bank with no reserved child: 0x140000000 + 0xa40f8000, ending exactly at the first reserved carve-out (0x1e40f8000). XNU takes a single physBase/memSize, so the full fragmented map cannot be described to it; this window is above every low carve-out (kernel, modem, adsp, ramoops, splash FB at 0x7e605000) and is 2.56 GiB, close to the iPhone X's 3 GB. The panic log is carved from its top (0x1e40e8000..0x1e40f7fff). The old vendor-DTB window (0x40000000+0x3e605000) is not used: it overlaps where LK loads the boot kernel and the Android kernel/ramoops regions.",
     "fb": "Live /chosen from fdt.dtb (2026-11-05): atag,videolfb-fb_base_l = 0xfe0d0000, atag,videolfb-fb_base_h = 0, atag,videolfb-vramSize = 0x1df0000, lcmname = nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv; /chosen mmi,panel_name = csot_vtdr6115_655_1080x2400_c7. The vendor DTB shipped with the firmware still says 0x7e605000 + 0x1be0000; LK rewrites both at boot, so the shim reads the live FDT in con_init() and sets boot_args.Video. The values in this file are only the fallback/ADT copy. /reserved-memory/mblock-16-framebuffer = 0xfe0d0000 + 0x1f2f000, and /proc/iomem reserves 0xfe0cf000-0xffffefff. Stride 1080*4 is assumed (no stride property in the DTB). The live vramSize fits three 4320-stride buffers with 0x46300 slack, but fits three 64-byte-aligned 4352-stride buffers almost exactly (0x1de2000 + 0xe000); if the console looks sheared on hardware, try 4352.",
-    "ufs": "Live /ufshci@112b0000: compatible mediatek,mt8183-ufshci, reg 0x112b0000+0x2300, interrupts <0 0x89 4> = SPI 137, clocks phy_sap/phy_tx_sym0/phy_rx_sym0/phy_rx_sym1/unipro_sys/unipro_tick/ufs_ck/ufs_fde_ck/ufs_tick/ufs_fde/ufs, resets unipro_rst/crypto_rst/hci_rst, supplies vcc_ufs2/vcc_ufs3/vccq/vccq2, mediatek,ufs-qos. The running kernel binds ufshcd-mtk (module ufs_mediatek_mod); CONFIG_SCSI_UFS_QCOM is not set. Live /proc/partitions: the main Android disk is sdc (249,921,536 KiB) with 91 GPT partitions; userdata is sdc90 (240,787,424 KiB = 229.7 GiB). /dev/block/by-name/userdata -> /dev/block/sdc90, so the GPT label is 'userdata' and patch 0028's name lookup matches. sda (mmcblk0boot0) and sdb (mmcblk0boot1) are the two 4 MiB UFS boot LUNs and carry preloader_a/preloader_b; fastboot getvar running-boot-lun=2 and the current slot is b, so the active preloader is on boot LUN B and the main GPT is sdc (assumed LUN 0). Android mounts userdata through dm-54 (f2fs + inlinecrypt); the SWEET driver reads raw sectors, so that layer is irrelevant. 4 KiB logical blocks are assumed (UFS class default), not measured.",
+    "ufs": "Live /ufshci@112b0000: compatible mediatek,mt8183-ufshci, reg 0x112b0000+0x2300, interrupts <0 0x89 4> = SPI 137, clocks phy_sap/phy_tx_sym0/phy_rx_sym0/phy_rx_sym1/unipro_sys/unipro_tick/ufs_ck/ufs_fde_ck/ufs_tick/ufs_fde/ufs, resets unipro_rst/crypto_rst/hci_rst, supplies vcc_ufs2/vcc_ufs3/vccq/vccq2, mediatek,ufs-qos. The running kernel binds ufshcd-mtk (module ufs_mediatek_mod); CONFIG_SCSI_UFS_QCOM is not set. Measured 2026-11-08 with root: /sys/block/sda -> 0:0:0:0, sdb -> 0:0:0:1, sdc -> 0:0:0:2, so the main GPT is UFS LUN 2, not LUN 0. LUN 0/1 are the 4 MiB preloader boot LUNs (UFS_BOOT magic at sector 0; mmcblk0boot0/1, labels preloader_a/b). The UFS device reports number_of_luns=3 and bBootLunEn=0x02 (LUN 1 is the enabled boot LUN; fastboot running-boot-lun=2 is 1-based). sdc has 91 GPT partitions, 249,921,536 KiB; the GPT header is at byte 0x1000 because logical_block_size=4096 (confirmed), and userdata is sdc90 (240,787,424 KiB = 229.7 GiB). /dev/block/by-name/userdata -> /dev/block/sdc90, so patch 0028's name lookup matches; its manaus override reads LUN 2. Android mounts userdata through dm-54 (f2fs + inlinecrypt); the SWEET driver reads raw sectors, so that layer is irrelevant.",
     "uart": "base.dts /serial@11001000 and /serial@11002000: mediatek,mt6577-uart, IRQs 0x8d/0x8e (141/142). Not verified that a test point is accessible.",
     "pmic": "base.dts /spmi@1c804000: mediatek,mt6879-spmi, reg pmif 0x1c804000+0x8ff, pmifmpu 0x1c804000+0x500, spmimst 0x1c801000+0x100, interrupt-parent pinctrl, interrupts <0xe9 4> = EINT 233. pmic@4 = mediatek,mt6363 (reg <4 0>, keys, regulators). The charger/gauge is mt6375@34 on i2c5 @0x11ed1000 (SPI 149), interrupt <3 8> = EINT 3. mt6363keys: power keycode 0x74 (116), home keycode 0x72 (114).",
     "touch": "Live base.dts: both controllers sit on spi3@11013000 (SPI 206). goodix_ts_spi@0 = goodix,gt9916S (CS0, reset GPIO 159, IRQ GPIO 22, avdd GPIO 167) is gated by mmi,status containing tm_vtdr6115; focaltech@1 = focaltech,fts (CS1, reset GPIO 159, IRQ GPIO 22, vdd GPIO 167, 12 MHz) is gated by csot_vtdr6115. /chosen mmi,panel_name is csot_vtdr6115_655_1080x2400_c7, so focaltech is the bound controller. The IRQ is a GPIO/EINT, not a GIC SPI. Panel node panel2@0 = csot,vtdr6115,vdo,144hz,c7 on dsi@14017000 (SPI 326), MIPI TX @0x11e50000, reset GPIO 97, pm-enable GPIOs 164/166/103/165.",

@@ -12,11 +12,12 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
   `xnu-8796.141.3`, verified locally (the only two that need the HFS staging
   script are 0031 and 0041; with `0026-stage-hfs.sh` staged they apply).
-- `xnu/patches-manaus/` now has **four overrides** (full copies of the base
+- `xnu/patches-manaus/` now has **five overrides** (full copies of the base
   patch, same filename, values changed): `0003` (live FB in the serial console),
-  `0004` (SWEET.h/GIC/timer/MT6879), `0010` (live FB in the V=P early mapping)
-  and `0012` (live FB alias + relocation after TTBR0). With them the whole
-  series `0004`–`0081` (minus 0031/0041) re-applies clean locally.
+  `0004` (SWEET.h/GIC/timer/MT6879), `0010` (live FB in the V=P early mapping),
+  `0012` (live FB alias + relocation after TTBR0) and `0028` (`su.lun = 2`).
+  With them the whole series `0004`–`0081` (minus 0031/0041) re-applies clean
+  locally.
 - **CI works with Xcode 16.0** (macOS 14 runners were retired 2026-11-02, and
   macos-15 no longer has Xcode 15.x). Three green runs: **42134881143** (commit
   `339511a`, 8.8 min), **42136147024** (commit `8b34cf5`, 12.5 min, arm64
@@ -61,21 +62,26 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 **Blocked before the first hardware boot:**
 1. **UFS bring-up is the main risk.** The base driver is Qualcomm-derived; the
    MT6879 uses `mediatek,mt8183-ufshci` + MTK PHY/clocks/resets/regulators and
-   `ufshcd-mtk`. Register/vendor init compatibility is unverified. The main
-   disk is assumed **LUN 0** and logical block **4096 B** — both still need a
-   direct read (`/sys/block/sdc/device`, `.../queue/logical_block_size`).
+   `ufshcd-mtk`. Register/vendor init compatibility is unverified. The LUN and
+   block size are now **measured** (2026-11-08, root, read-only): main GPT is
+   `sdc` = SCSI `0:0:0:2` → **LUN 2** (not 0); `logical_block_size = 4096`
+   (`EFI PART` at byte `0x1000`). Override `0028` sets `su.lun = 2`.
 2. **CurrentEL is unknown.** `shim/start.S` has no EL2→EL1 drop; if the first
    boot prints `EL = 2`, that transition is the next code change.
-3. First boot itself has not happened (needs verified `boot_b`/`vendor_boot_b`
-   backups and user confirmation).
+3. First boot itself has not happened (backups are done; needs user
+   confirmation to flash).
 
 **Next action (in order):**
-1. Commit and push `origin/manaus` (overrides, shim, tools, hw facts, docs).
-2. Ask the user for the one short root command that settles LUN/block size:
-   `readlink -f /sys/block/sda /sys/block/sdb /sys/block/sdc` and
-   `cat /sys/block/sdc/queue/logical_block_size /sys/block/sdc/queue/physical_block_size`.
-3. After verified backups of `boot_b` + `vendor_boot_b`, first hardware boot and
-   report the `EL` line.
+1. ~~Commit and push `origin/manaus`~~ **done**: `89240d8` shim, `2a407a4`
+   overrides, `5a1df52` hw/docs, `fe58f74` CI note. CI run **42486570806**
+   green, kernel 17188840 B `sha256=73b1ed3f...94b3b3`.
+2. ~~Settle LUN / block size~~ **done** (2026-11-08): LUN 2, 4096 B. Override
+   `0028` and `hw/manaus.hw.json` updated.
+3. ~~Backups~~ **done** (2026-11-08): device `boot_b` + `vendor_boot_b` dumped,
+   pulled and hash-verified (`bbc67027...` / `dc77a358...`), stock DTBO saved.
+4. **Stage shim-only v4 images** and ask the user to confirm flashing
+   `boot_b` + `vendor_boot_b`. Report the shim's `EL`, `FBBASE`, `FBSIZE`,
+   `LOADER` and `UFS` lines.
 
 **Do not** flash `boot_a`/`vendor_boot_a`/`vbmeta`/`lk`/`preloader`. The only
 vetted targets are `boot_b` and `vendor_boot_b`, after the backups above pass

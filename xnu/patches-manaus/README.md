@@ -88,7 +88,7 @@ git apply --check ../patches-manaus/0004-sweet-machine-config.patch
 
 ## Estado actual (2026-11-08)
 
-Hay cuatro overrides, todos copias completas del parche base con los cambios
+Hay cinco overrides, todos copias completas del parche base con los cambios
 indicados (nunca se aplican encima del base):
 
 | Override | Cambios |
@@ -97,6 +97,7 @@ indicados (nunca se aplican encima del base):
 | `0004-sweet-machine-config.patch` | `SWEET_VTIMER_INTID 19 -> 27`; stride de GICR por `GICR_TYPER.VLPIS` en runtime (`0x40000` GICv4 / `0x20000` GICv3) en `pe_fiq/find_gicr_pe_base()`, con `GICR_PE_SIZE_V3/V4` y `GICR_TYPER_VLPIS` en `SWEET.h`; comentarios MT6879. |
 | `0010-sweet-early-framebuffer-debug.patch` | `start.s` lee `BA_VIDEO_BASE/ROWBYTES/HEIGHT`; el mapeo V=P de 32 MiB usa el bloque que contiene el FB vivo (ya no `0x9c000000`); `genassym.c` publica esos offsets; `sweet_early_init(args)` en `arm_init()`. |
 | `0012-sweet-keep-debug-console-after-ttbr0.patch` | `sweet_early_map_final()` mapea el bloque de 32 MiB del FB vivo y `sweet_early_relocate()` mueve la consola al mismo offset dentro del alias VA del kernel; marcas 10–20; `arm_vm_init`/`arm_init`/`pe_serial`/`Makefile`. |
+| `0028-sweet-ufs-root-device.patch` | `su.lun = 0 -> 2`: en MT6879 la GPT principal (`sdc` → `0:0:0:2`) está en el LUN 2; LUN 0/1 son los boot LUNs del preloader. Medido en el teléfono el 2026-11-08 (`logical_block_size = 4096`, header `EFI PART` en el byte `0x1000`). |
 
 Hecho de 16K: `ARM_TT_L2_SIZE = 0x2000000` (32 MiB). Tanto el banco de RAM
 (`0x140000000`) como el FB (`0xfe0d0000`) están por debajo de 64 GiB, así que
@@ -106,9 +107,9 @@ comparten el L1 índice 0 del mapa V=P y el primer L2 sigue siendo
 
 Verificado sobre `xnu-8796.141.3`: `0001`–`0003`, override `0004`, `0005`–`0009`,
 override `0010`, `0011`, override `0012`, y después `0013`–`0081` aplican limpios
-(solo `0031`/`0041` necesitan `0026-stage-hfs.sh`). Los parches posteriores que
-tocan archivos del override (`0017` en `protos.h`, `0065` en `start.s`) no
-conflictúan.
+(solo `0031`/`0041` necesitan `0026-stage-hfs.sh`), incluido el override `0028`
+(`su.lun = 2`). Los parches posteriores que tocan archivos del override (`0017`
+en `protos.h`, `0065` en `start.s`) no conflictúan.
 
 El stride de GICR **ya no** es una constante de compilación: se lee
 `GICR_TYPER.VLPIS` (bit 1) del primer redistribuidor en `pe_fiq` y en el shim,

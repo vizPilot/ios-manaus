@@ -256,25 +256,40 @@ MT6879 en vez de los de SM7150.
 - **El `CurrentEL` de entrada.** `shim/start.S` no baja de EL2 a EL1; si el
   primer arranque imprime `EL = 2`, ese es el siguiente cambio.
 
-## 6. Lo único que falta del teléfono (una orden, solo lectura)
+## 6. Lo único que faltaba del teléfono — **RESUELTO (2026-11-08)**
 
-Para cerrar el storage hacen falta dos datos que no están en el intake:
-el **LUN** del disco principal (`sdc`) y el **tamaño de bloque lógico**. Con
-root:
+Se consultó en el teléfono con root, solo lectura:
 
 ```bash
 adb shell su -c 'readlink -f /sys/block/sda /sys/block/sdb /sys/block/sdc; \
   cat /sys/block/sdc/queue/logical_block_size /sys/block/sdc/queue/physical_block_size'
 ```
 
-Interpretación:
+Resultado medido:
 
-- `sda`/`sdb` deben resolver a los boot LUNs (`.../host0/.../target0:0:0/0:0:0:0/block/sda`
-  y `.../0:0:0:1/block/sdb` o similar). El `sdc` debe colgar de un `target` con
-  **LUN 0**; si no, se corrige `ufs.main_lun` en `hw/manaus.hw.json` y en el
-  driver.
-- `logical_block_size` 4096 confirma el valor asumido; si sale 512, el driver
-  tiene que usar ese tamaño para los accesos raw.
+| Dato | Valor | Cómo se comprobó |
+| --- | --- | --- |
+| `sda` | `0:0:0:0` | `readlink -f /sys/block/sda` |
+| `sdb` | `0:0:0:1` | `readlink -f /sys/block/sdb` |
+| `sdc` (GPT principal) | **`0:0:0:2` → LUN 2** | `readlink -f /sys/block/sdc` |
+| bloque lógico | **4096** | `queue/logical_block_size` |
+| bloque físico | **4096** | `queue/physical_block_size` |
 
-No hay que escribir nada: es `readlink` + `cat`. Con eso, el storage queda
-cerrado y solo queda el primer arranque de hardware (con respaldos verificados).
+Confirmación cruzada: el sector de `sdc` en el byte `0x1000` (LBA 1 con bloques
+de 4 KiB) contiene `EFI PART`; en LUN 0 y LUN 1 el sector 0 contiene la firma
+`UFS_BOOT`. Los descriptores del dispositivo dan `number_of_luns = 3`,
+`bBootLunEn = 0x02` y `max_number_of_luns = 1`.
+
+Consecuencias:
+
+- El **LUN principal es 2**, no 0. Se corrigió `hw/manaus.hw.json`
+  (`ufs.main_lun = 2`, `number_of_luns = 3`, `logical_block_assumed = false`) y
+  el override `xnu/patches-manaus/0028-sweet-ufs-root-device.patch`
+  (`su.lun = 2`).
+- Los accesos raw a la GPT y a `userdata` se hacen en bloques de 4 KiB; el
+  driver expone sectores lógicos de 512 B por encima.
+- LUN 0/1 son los boot LUNs del preloader (4 MiB, `mmcblk0boot0/1`), no el
+  almacenamiento de Android.
+
+El storage queda cerrado; solo queda el primer arranque de hardware (con
+respaldos verificados).
