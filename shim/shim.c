@@ -15,6 +15,7 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "pmsg.h"
 
 #define GICD_BASE		0x0c000000UL
 #define GICR_BASE		0x0c040000UL
@@ -53,7 +54,39 @@
 #define PSCI_SYSTEM_RESET2	0xc4000012UL
 #define SMCCC_VERSION		0x80000000UL
 
+/*
+ * MediaTek TOPRGU watchdog (DT: watchdog@1c007000, mediatek,mt6879-wdt).
+ * Linux drivers/watchdog/mtk_wdt.c: one LENGTH unit is 512 ticks of the
+ * 32 kHz clock and the driver encodes (seconds << 6) units in bits [15:5];
+ * MODE bit 0 enables, bit 3 selects IRQ (we want reset), bit 6 is dual mode,
+ * bits [31:24] are the 0x22 key. SWRST 0x1209 forces an immediate reset.
+ */
+#define WDT_BASE		0x1c007000UL
+#define WDT_MODE		0x00
+#define WDT_LENGTH		0x04
+#define WDT_RST			0x08
+#define WDT_SWRST		0x14
+#define WDT_MODE_EN		(1U << 0)
+#define WDT_MODE_IRQ_EN		(1U << 3)
+#define WDT_MODE_DUAL_EN	(1U << 6)
+#define WDT_MODE_KEY		0x22000000U
+#define WDT_LENGTH_KEY		0x8U
+#define WDT_RST_RELOAD		0x1971U
+#define WDT_SWRST_KEY		0x1209U
+
 #define NR_CPUS			8
+
+/*
+ * Milestone A (2026-11-09): stop right after the entry record and warm reset.
+ * This proved the slot-a fallback: the shim is flashed to boot_a and slot a is
+ * active, so LK decrements slot a's retry count; on the next boot it marks a
+ * unbootable and falls back to Android on b. That avoids the fastboot visit
+ * that wipes the ramoops region. The full path also ends in reset_now(), so it
+ * is now the default; build with -DSHIM_MILESTONE_A=1 to get the early stop.
+ */
+#ifndef SHIM_MILESTONE_A
+#define SHIM_MILESTONE_A 0
+#endif
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
@@ -116,6 +149,38 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	delay_ms(after_s * 1000);
 	/* MT6879 firmware exposes PSCI SYSTEM_RESET (the DT has a psci node). */
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
+/*
+ * Arm the TOPRGU watchdog so the SoC resets even if the shim hangs before
+ * reaching reset_now(). The kernel's wdtk thread pets the same watchdog, so
+ * the clock is already on; we only shorten the timeout and never pet it.
+ */
+static void wdt_arm(unsigned seconds)
+{
+	uint32_t mode;
+
+	wr32(WDT_BASE + WDT_LENGTH, ((seconds << 6) << 5) | WDT_LENGTH_KEY);
+	wr32(WDT_BASE + WDT_RST, WDT_RST_RELOAD);
+	mode = rd32(WDT_BASE + WDT_MODE);
+	mode &= ~(WDT_MODE_IRQ_EN | WDT_MODE_DUAL_EN);
+	mode |= WDT_MODE_EN | WDT_MODE_KEY;
+	wr32(WDT_BASE + WDT_MODE, mode);
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * Early exit: no timer and no console before the reset, so a trapped
+ * generic counter or a bad framebuffer cannot block the handback. PSCI is
+ * the same warm reset as `adb reboot` and preserves DRAM; if the SMC
+ * returns, force the TOPRGU software reset instead.
+ */
+static void __attribute__((noreturn)) reset_now(void)
+{
+	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	wr32(WDT_BASE + WDT_SWRST, WDT_SWRST_KEY);
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -383,10 +448,41 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 	struct fb_info fb;
 
+	/* Reset the SoC if any later step hangs; PSCI below is the fast path. */
+	wdt_arm(15);
+
+	/*
+	 * First output: a ramoops record in DRAM. manaus hands over with the
+	 * panel off (islcm_inited=0), so this is the only channel that survives
+	 * a reset. Log the EL before touching any EL1-only system register.
+	 */
+	pmsg_reset();
+	pmsg_str("SHIM", "manaus milestone 1 entry");
+	pmsg_hex("EL", rsr("currentel") >> 2);
+	pmsg_hex("DTB", dtb);
+	pmsg_flush();
+
+#if SHIM_MILESTONE_A
+	/*
+	 * Publish and warm reset before con_init: no timer and no console can
+	 * block it. LK falls back to slot b (Android), whose kernel reads this
+	 * record from /sys/fs/pstore/pmsg-ramoops-0. No fastboot visit, so DRAM
+	 * is not wiped.
+	 */
+	stage = "early-reset";
+	pmsg_str("STAGE", "early-reset");
+	pmsg_flush();
+	reset_now();
+#endif
+
 	/* LK rewrites the splash framebuffer address on every boot. */
 	stage = "con_init";
 	con_init(dtb);
 	con_fb_get(&fb);
+	pmsg_hex("FBBASE", fb.base);
+	pmsg_hex("FBSIZE", fb.size);
+	pmsg_str("LCM", con_active() ? "inited" : "off");
+	pmsg_flush();
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
@@ -396,18 +492,30 @@ void shim_main(uint64_t dtb)
 	con_hex("FBBASE", fb.base);
 	con_hex("FBSIZE", fb.size);
 	con_skip();
+	pmsg_str("STAGE", "loader_boot");
+	pmsg_flush();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
+	pmsg_str("STAGE", "test_ufs");
+	pmsg_flush();
 	test_ufs();
 	con_skip();
-	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
-	delay_ms(180000);
-	reset(20);
+	/*
+	 * Every probe line was flushed as it was printed. Reset through PSCI
+	 * (proven to work on manaus) instead of hanging: the shim runs from
+	 * boot_a with slot a active, so LK decrements the retry count on each
+	 * boot and eventually falls back to Android on b. No fastboot visit,
+	 * so the ramoops record survives for the next Android boot to read.
+	 * (The TOPRGU watchdog armed above is only the safety net for a hang
+	 * inside test_ufs; PSCI is the normal exit.)
+	 */
+	pmsg_str("STAGE", "done");
+	pmsg_flush();
+	reset_now();
 
 	stage = "fill off";
 	uint64_t fill_off = ticks_fill(RED);

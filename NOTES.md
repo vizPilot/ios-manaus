@@ -59,41 +59,46 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `out/Image` 16,080 B); host console render still writes `out/host.ppm`.
 - Docs: `docs/manaus/{00-FACTIBILIDAD,01-DELTA-HARDWARE,02-TRIAGE-DE-PARCHES,03-PLAN,04-M1,05-TOMAR-DATOS}.md`.
 
-**Blocked before the first hardware boot:**
-1. **UFS bring-up is the main risk.** The base driver is Qualcomm-derived; the
-   MT6879 uses `mediatek,mt8183-ufshci` + MTK PHY/clocks/resets/regulators and
-   `ufshcd-mtk`. Register/vendor init compatibility is unverified. The LUN and
-   block size are now **measured** (2026-11-08, root, read-only): main GPT is
-   `sdc` = SCSI `0:0:0:2` → **LUN 2** (not 0); `logical_block_size = 4096`
-   (`EFI PART` at byte `0x1000`). Override `0028` sets `su.lun = 2`.
-2. **CurrentEL is unknown.** `shim/start.S` has no EL2→EL1 drop; if the first
-   boot prints `EL = 2`, that transition is the next code change.
-3. First boot itself has not happened (backups are done; needs user
-   confirmation to flash).
+**First hardware boot (2026-11-09): gzip root cause + full shim.**
+- **LK requires a gzip kernel.** `boot_linux_fdt:510` unconditionally
+  gzip-decompresses; a raw ARM64 Image gives `gzip header is not correct` →
+  `decompress kernel image fail!!!` → `SW Panic(9)` reboot. All earlier
+  "hangs" were this panic loop; the shim never executed. The `logs` partition
+  shows it for every slot-`a` attempt (`kernel_sz=0x2c000/0x2f000/0xe0`).
+- **Slot fallback works without fastboot.** Shim on `boot_a`, Android on `b`,
+  `fastboot set_active a` (retry 7); the shim resets, LK exhausts 7 retries,
+  marks `a` unbootable and boots `b`. A fastboot visit wipes ramoops; the
+  automatic fallback preserves it. `logs2` shows retry 7→6→…→1→`b` with a
+  `jump to linux` each time.
+- **Gzipped probe: `PROBE EL1`.** Minimal probe (`shim/probe.S`, 224 B raw →
+  179 B gzip) reached the pmsg beacon and PSCI-reset. LK hands over at **EL1**
+  (not EL2), so the shim's `vbar_el1`/`spsel` are valid. PSCI
+  `SYSTEM_RESET` works.
+- **Full shim (2026-11-09), `-DSHIM_MILESTONE_A=0`, no payload.** 192,512 B
+  raw → 8,607 B gzip, v4 `boot.img` only, flashed to `boot_a`, `set_active a`.
+  Android returned automatically in 167 s (7 attempts). pstore
+  (`pmsg-ramoops-0` and `console-ramoops-0`, 873 B each):
+  `EL=1 DTB=0x47c80000 FBBASE=0xfe0d0000 FBSIZE=0x1df0000 LCM=off`;
+  `INITRD 0x66f00000..0x6883926f` → `LOADER=no SWEETXNU payload`;
+  UFS `ver=0x200 cap=0x3587071f hce=1 hcs=0x10f rsr=1 nutrs=0x20`, host
+  accepted our list (`ours=0x40016000 rsr=1`); then `STAGE=done` → PSCI reset.
+- **UFS SCSI still fails (M3 risk):** first TUR returns `OCS=5`
+  (`ocs/st=0x0500`), then CAP/READ time out (`rc=1`). Registers and the
+  request list work; the command/UPIU path or MTK vendor init does not. This
+  is the next UFS task.
+- **Device state after the test:** `boot_a` restored from the verified backup
+  (`sha256=bbc67027…`, byte-identical to `boot_b`), `set_active b`, Android
+  boots `_b` in 28 s. `vendor_boot_a`/`vendor_boot_b` untouched.
+- **Next action:** (1) fix `shim/ufs.c` command path / MTK vendor init;
+  (2) ask the user to approve dumping/backing up and flashing `vendor_boot_a`
+  for a full-payload test on slot `a` (LK's `linux,initrd-start` is the
+  vendor ramdisk at `0x66f00000`; the payload must be there). (3) Confirm CI
+  runs `42542526267` (`00412ff`) and the `7932d10` run finished green.
 
-**Next action (in order):**
-1. ~~Commit and push `origin/manaus`~~ **done**: `89240d8` shim, `2a407a4`
-   overrides, `5a1df52` hw/docs, `fe58f74` CI note. CI run **42486570806**
-   green, kernel 17188840 B `sha256=73b1ed3f...94b3b3`.
-2. ~~Settle LUN / block size~~ **done** (2026-11-08): LUN 2, 4096 B. Override
-   `0028` and `hw/manaus.hw.json` updated.
-3. ~~Backups~~ **done** (2026-11-08): device `boot_b` + `vendor_boot_b` dumped,
-   pulled and hash-verified (`bbc67027...` / `dc77a358...`), stock DTBO saved.
-4. **Shim-only v4 images staged** (2026-11-08) in `shim/out/first-boot/`:
-   `shim-boot.img` (188,416 B,
-   `sha256=e6ee2194...187a94`) and `shim-vendor_boot.img` (262,144 B,
-   `sha256=62c6f3de...e0c0e9`). Kernel is `shim/out/Image` (180,224 B, no
-   payload: 4096 zero bytes as ramdisk); the vendor DTB is the stock
-   249,100-byte DTBO, byte-identical. Header addresses now match stock
-   (`kernel 0x40000000`, `ramdisk 0x66f00000`, `tags/dtb 0x47c80000`).
-   `shim/ufs.c` was pointing at sweet's UFS (`0x01d84000`, LUN 0); it now uses
-   manaus `0x112b0000` and LUN 2, so the no-payload probe is safe and relevant.
-5. Ask the user to confirm flashing `boot_b` + `vendor_boot_b`, then report the
-   shim's `EL`, `FBBASE`, `FBSIZE`, `LOADER` and `UFS` lines.
-
-**Do not** flash `boot_a`/`vendor_boot_a`/`vbmeta`/`lk`/`preloader`. The only
-vetted targets are `boot_b` and `vendor_boot_b`, after the backups above pass
-`tools/bootimg.py info`.
+**Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
+without a verified backup. The 2026-11-09 exception allows the shim on
+`boot_a` (after backing it up) for the slot-fallback experiment only; it does
+**not** cover `vendor_boot_a`.
 
 ---
 

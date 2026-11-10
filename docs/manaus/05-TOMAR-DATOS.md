@@ -137,8 +137,15 @@ fastboot flash vendor_boot_b  shim-vendor_boot.img
 fastboot reboot
 ```
 
-Nunca `boot_a`, `vendor_boot_a`, `vbmeta`, `lk` ni `preloader`: el slot `a` no
-está sano (`slot-successful:_a: no`) y no sirve de red.
+Nunca `vbmeta`, `lk` ni `preloader`. Tampoco `vendor_boot_a`. `boot_a` solo se
+toca con la excepción del 2026-11-09 (experimento de fallback de slot): se
+respalda antes y se restaura después; ver sección 7.
+
+**El kernel debe ir comprimido en gzip.** El LK (`boot_linux_fdt:510`)
+descomprime siempre; una `Image` ARM64 cruda provoca
+`gzip header is not correct` → `decompress kernel image fail` →
+`SW Panic(9)`. `tools/mkbootimg-manaus.sh` y `shim/build.sh` comprimen ahora
+la imagen automáticamente.
 
 - Si arranca XNU: objetivo de M1.
 - Si no arranca o se queda en el logo: apagar 10 s y restaurar **las dos**
@@ -244,17 +251,20 @@ MT6879 en vez de los de SM7150.
 
 ## 5. Lo que no se puede saber desde el teléfono
 
-- **Si el LK deja el framebuffer encendido y mapeado tras el handoff.** El FDT
-  vivo dice `islcmfound = 1` y LK reescribe `atag,videolfb-fb_base_l`, pero solo
-  se confirma arrancando el shim. Por eso `console.c` lee base/tamaño del FDT en
-  runtime y deja la consola desactivada si `boot_args.Video` viene vacío.
-- **Si `userdata` (UFS) responde con el driver `sweet-ufs` portado a
-  `ufshcd-mtk`.** El nodo DT y el driver Android están confirmados
-  (`mediatek,mt8183-ufshci`, `ufshcd-mtk`, `CONFIG_SCSI_UFS_QCOM` no puesto),
-  pero la compatibilidad de registros/vendor-init con el driver base
-  (derivado de Qualcomm) sigue sin probar. Es el mayor riesgo de M3.
-- **El `CurrentEL` de entrada.** `shim/start.S` no baja de EL2 a EL1; si el
-  primer arranque imprime `EL = 2`, ese es el siguiente cambio.
+- ~~**Si el LK deja el framebuffer encendido y mapeado tras el handoff.**~~
+  **RESUELTO (2026-11-09):** el FDT vivo da `fb_base_l=0xfe0d0000`,
+  `vramSize=0x1df0000`, pero `islcm_inited=0`: el panel está apagado en el
+  handoff. `con_init()` lee los valores vivos y deja el dibujo desactivado
+  (`LCM=off`). El log persistente (ramoops pmsg) es el canal real.
+- ~~**Si `userdata` (UFS) responde con el driver `sweet-ufs` portado a
+  `ufshcd-mtk`.**~~ **PARCIAL (2026-11-09):** los registros UFSHCI se leen
+  (`ver=0x200`, `cap=0x3587071f`, `hce=1`, `hcs=0x10f`, `nutrs=0x20`) y el
+  host acepta nuestra lista (`ours=0x40016000 rsr=1`), pero los comandos SCSI
+  fallan (TUR `OCS=5`, CAP/READ timeout). Falta el vendor-init de MTK / la
+  ruta UPIU. Sigue siendo el mayor riesgo de M3.
+- ~~**El `CurrentEL` de entrada.**~~ **RESUELTO (2026-11-09):** el LK entrega
+  en **EL1** (`PROBE EL1` en pstore). `vbar_el1`/`spsel` del shim son válidos;
+  no hace falta bajar de EL2.
 
 ## 6. Lo único que faltaba del teléfono — **RESUELTO (2026-11-08)**
 
@@ -293,3 +303,74 @@ Consecuencias:
 
 El storage queda cerrado; solo queda el primer arranque de hardware (con
 respaldos verificados).
+
+## 7. Primer arranque de hardware — **HECHO (2026-11-09)**
+
+### 7.1 Causa raíz de los "cuelgues": el LK exige gzip
+
+`boot_linux_fdt:510` llama siempre al descompresor gzip. Una `Image` ARM64
+cruda produce:
+
+```
+boot_linux_fdt:510: decompress kernel image...
+gzip header is not correct. Error!
+panic (caller ...): decompress kernel image fail!!!
+HALT: action = reboot(0), reason = SW Panic(9)
+```
+
+Nunca se ejecutaba ni el shim ni la sonda. Los `kernel_sz` de los intentos del
+slot `a` en la partición `logs` (`0x2c000`, `0x2f000`, `0x2f000`, `0x2f000`,
+`0xe0`) lo confirman. El kernel stock del slot `b` sí es gzip
+(`kernel_size=0x1297a7d`, primeros bytes `1f 8b 08`).
+
+Solución: comprimir la `Image` antes de empaquetar. Ya está en
+`tools/mkbootimg-manaus.sh` (detecta si ya es gzip y comprime si no) y en
+`shim/build.sh` (`out/Image.gz`). El header ARM64 del shim es
+`code0 = b _start` (`_start` en `0x800` por la alineación de `vectors`),
+`image_size = _end`, `flags = 0xa`, magic `ARMd`; el LK salta al inicio de la
+imagen descomprimida, así que es compatible.
+
+### 7.2 Fallback de slot sin fastboot
+
+`fastboot boot`/`fetch` no existen en este LK. Visitar fastboot borra el
+ramoops. La secuencia que funciona:
+
+1. respaldar `boot_a` (hecho: `sha256=bbc67027…`, idéntico a `boot_b`);
+2. `fastboot flash boot_a shim-boot.img` (v4, solo el kernel);
+3. `fastboot set_active a` (deja `slot-retry-count:_a = 7`);
+4. arrancar y **no tocar fastboot**: el shim reinicia (PSCI), el LK agota los
+   7 reintentos, marca `a` no arrancable y arranca Android del slot `b`.
+
+`logs` muestra `retry 7→6→…→1` con `decompress kernel image...` +
+`jump to linux kernel 64Bit` en cada pasada, y luego el arranque de `b`.
+
+### 7.3 Resultados medidos
+
+- **Sonda mínima** (`shim/probe.S`, 224 B → 179 B gzip): pstore =
+  `PROBE EL1`. El LK entrega en **EL1**; PSCI `SYSTEM_RESET` funciona.
+- **Shim completo** (`-DSHIM_MILESTONE_A=0`, sin payload, 192,512 B →
+  8,607 B gzip), solo `boot_a`, `set_active a`. Android volvió solo en 167 s.
+  pstore (`pmsg-ramoops-0` y `console-ramoops-0`, 873 B cada uno):
+
+```
+EL=1 DTB=0x47c80000 FBBASE=0xfe0d0000 FBSIZE=0x1df0000 LCM=off
+INITRD 0x66f00000..0x6883926f
+LOADER=no SWEETXNU payload
+UFS ver=0x200 cap=0x3587071f hce=1 hcs=0x10f rsr=1 nutrs=0x20
+UFS ours=0x40016000 rsr=1
+UFS TUR rc=2 ocs/st=0x0500
+UFS CAP rc=1 ocs/st=0x0500
+UFS READ rc=1 ocs/st=0x0500
+STAGE=done
+```
+
+- **UFS:** registros y lista de transferencia OK; los comandos SCSI fallan
+  (`OCS=5` en el primer TUR, luego timeouts). Falta el vendor-init de MTK o
+  corregir la UPIU/PRDT. Es el siguiente trabajo de M3.
+- **Estado del teléfono tras la prueba:** `boot_a` restaurado desde el backup
+  verificado, `set_active b`, Android `_b` en 28 s. `vendor_boot_a` y
+  `vendor_boot_b` intactos.
+- **Pendiente para probar el payload completo en el slot `a`:** el
+  `linux,initrd-start` del LK es el vendor ramdisk (`0x66f00000`), así que el
+  payload debe ir en `vendor_boot_a`. Eso requiere aprobación explícita del
+  usuario, backup de `vendor_boot_a` y una prueba de que el UFS responde.

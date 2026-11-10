@@ -39,6 +39,8 @@ extern volatile uint32_t *con_fb;
 /* Read the live framebuffer from /chosen; safe to call with dtb == 0. */
 void con_init(uintptr_t dtb);
 void con_fb_get(struct fb_info *out);
+/* 0 when LK handed over with atag,videolfb-islcm_inited = 0 (panel off). */
+int con_active(void);
 
 void con_clear(uint32_t bg);
 void con_skip(void);

@@ -59,6 +59,20 @@ command -v mkbootimg >/dev/null || {
 [ -f "$PAYLOAD" ] || { echo "missing payload: $PAYLOAD" >&2; exit 1; }
 [ -f "$DTB" ] || { echo "missing dtb: $DTB" >&2; exit 1; }
 
+# MTK LK (boot_linux_fdt:510) unconditionally gzip-decompresses the kernel: a
+# raw ARM64 Image dies with "gzip header is not correct" -> SW Panic(9) reboot,
+# before a single instruction of the shim runs. Accept a raw image or an
+# already-compressed one, and always hand mkbootimg gzip.
+SHIM_TMP=""
+cleanup() { [ -z "$SHIM_TMP" ] || rm -rf "$SHIM_TMP"; }
+trap cleanup EXIT
+if [ "$(head -c 2 "$SHIM" | od -An -tx1 | tr -d ' \n')" != "1f8b" ]; then
+	SHIM_TMP=$(mktemp -d)
+	gzip -9 -n -c "$SHIM" > "$SHIM_TMP/kernel.gz"
+	SHIM="$SHIM_TMP/kernel.gz"
+	echo "note: kernel was raw, gzipped to $SHIM"
+fi
+
 mkdir -p "$OUT"
 
 mk_boot() {  # mk_boot HEADER CMDLINE [extra mkbootimg args...]

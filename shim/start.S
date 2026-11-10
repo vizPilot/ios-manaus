@@ -20,6 +20,31 @@ _head:
 	.globl _start
 _start:
 	msr	daifset, #0xf
+	/*
+	 * Persistent beacon before any C: a valid ramoops pmsg record at
+	 * 0x48160000. Live layout (2026-11-08):
+	 *   ramoops.mem_address=0x48090000, mem_size=0xe0000,
+	 *   dmesg 143*0x1000 -> console 0x40000 -> ftrace 0x1000 -> pmsg 0x10000
+	 * Header: sig 0x43474244 ("DBGC"), start 0, size 15, then the text.
+	 * If C faults or the UFS probe hangs, the next Android boot still shows
+	 * /sys/fs/pstore/pmsg-ramoops-0 with SHIM_ASM_ENTRY.
+	 */
+	movz	x1, #0x4816, lsl #16
+	movz	w2, #0x4244
+	movk	w2, #0x4347, lsl #16
+	str	w2, [x1]
+	str	wzr, [x1, #4]
+	mov	w3, #15
+	str	w3, [x1, #8]
+	adr	x4, beacon_text
+	add	x5, x1, #12
+	mov	w6, #15
+0:	ldrb	w7, [x4], #1
+	strb	w7, [x5], #1
+	subs	w6, w6, #1
+	b.ne	0b
+	dsb	sy
+
 	mov	x19, x0			/* DTB pointer from ABL */
 	msr	spsel, #1
 	adr	x1, _stack_top
@@ -126,3 +151,8 @@ exc_common:
 	add	sp, sp, #(30 * 8)
 	ldp	x29, x30, [sp], #16
 	eret
+
+	.section .rodata
+	.balign	8
+beacon_text:
+	.ascii	"SHIM_ASM_ENTRY\n"

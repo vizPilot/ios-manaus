@@ -10,6 +10,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "font.h"
+#include "pmsg.h"
 
 #define SCALE		3
 #define CH_W		(8 * SCALE)
@@ -22,10 +23,17 @@ static uint64_t con_fb_size = FB_SIZE_FALLBACK;
 static uint32_t con_w = FB_W, con_h = FB_H, con_stride = FB_STRIDE;
 static uint32_t con_bg;
 static int row;
+/*
+ * Drawing starts disabled: con_fb still points at the compile-time fallback,
+ * which is not the live carve-out on manaus. An exception before con_init()
+ * must not paint (and fault) into that bogus address. con_init() explicitly
+ * enables drawing once it has read the live framebuffer and panel state.
+ */
+static int con_off = 1;
 
 void con_init(uintptr_t dtb)
 {
-	uint64_t base = 0, hi = 0, size = 0;
+	uint64_t base = 0, hi = 0, size = 0, lcm = 1;
 
 	if (fdt_chosen_u64(dtb, "atag,videolfb-fb_base_l", &base)) {
 		if (fdt_chosen_u64(dtb, "atag,videolfb-fb_base_h", &hi))
@@ -35,6 +43,17 @@ void con_init(uintptr_t dtb)
 	}
 	if (!fdt_chosen_u64(dtb, "atag,videolfb-vramSize", &size) || !size)
 		size = FB_SIZE_FALLBACK;
+
+	/*
+	 * manaus reports islcmfound=1 but islcm_inited=0: LK found the panel
+	 * and allocated the splash buffer, but hands over with the LCM off.
+	 * Drawing into the carve-out cannot be seen; the persistent log is the
+	 * only output. Absent property (sweet) means "assume initialized".
+	 */
+	if (fdt_chosen_u64(dtb, "atag,videolfb-islcm_inited", &lcm))
+		con_off = !lcm;
+	else
+		con_off = 0;	/* property absent (sweet): assume LK left it on */
 
 	/* Geometry is fixed by the panel; only the buffer moves. */
 	uint32_t w = FB_W, h = FB_H, stride = FB_STRIDE;
@@ -64,6 +83,8 @@ void con_fb_get(struct fb_info *out)
 
 void con_clear(uint32_t bg)
 {
+	if (con_off)
+		return;
 	for (uint32_t y = 0; y < con_h; y++) {
 		volatile uint32_t *line = con_fb + y * (con_stride / 4);
 		for (uint32_t x = 0; x < con_w; x++)
@@ -75,6 +96,8 @@ void con_clear(uint32_t bg)
 
 static void put_char(int col, char ch, uint32_t fg)
 {
+	if (con_off)
+		return;
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];
@@ -111,6 +134,7 @@ static void fmt_hex(char *buf, uint64_t v, int digits)
 void con_skip(void)
 {
 	row++;
+	pmsg_skip();
 }
 
 void con_str(const char *label, const char *s)
@@ -118,6 +142,9 @@ void con_str(const char *label, const char *s)
 	put_str(0, label, YELLOW);
 	put_str(LABEL_COLS, s, WHITE);
 	row++;
+	/* Every line also goes to the persistent ramoops log. */
+	pmsg_str(label, s);
+	pmsg_flush();
 }
 
 void con_hex(const char *label, uint64_t v)
@@ -141,4 +168,11 @@ void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint
 		put_str(col, buf, WHITE);
 	}
 	row++;
+	pmsg_hex2(label, a, va, b, vb);
+	pmsg_flush();
+}
+
+int con_active(void)
+{
+	return !con_off;
 }
