@@ -20,6 +20,16 @@ _head:
 	.globl _start
 _start:
 	msr	daifset, #0xf
+	/* Disable MMU + caches in case we were entered with them on (kexec). */
+	mrs	x1, sctlr_el1
+	bic	x1, x1, #(1 << 0)	/* M: MMU enable */
+	bic	x1, x1, #(1 << 2)	/* C: D-cache enable */
+	bic	x1, x1, #(1 << 12)	/* I: I-cache enable */
+	msr	sctlr_el1, x1
+	isb
+	tlbi	vmalle1
+	dsb	sy
+	isb
 	/*
 	 * Persistent beacon before any C: a valid ramoops pmsg record at
 	 * 0x48160000. Live layout (2026-11-08):

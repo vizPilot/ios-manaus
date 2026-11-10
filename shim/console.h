@@ -14,8 +14,8 @@
  * console looks sheared on hardware, the LK pitch may be 64-byte aligned
  * (4352), so change FB_STRIDE here and in the XNU 0003/0010/0012 overrides.
  */
-#define FB_BASE_FALLBACK	0x7e605000UL
-#define FB_SIZE_FALLBACK	0x1be0000UL
+#define FB_BASE_FALLBACK	0xfe0d0000UL	/* manaus live (2026-11-05); sweet fallback 0x7e605000 */
+#define FB_SIZE_FALLBACK	0x1df0000UL
 #define FB_W			1080
 #define FB_H			2400
 #define FB_STRIDE		(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
