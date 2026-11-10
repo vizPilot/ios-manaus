@@ -89,11 +89,14 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 - **Device state after the test:** `boot_a` restored from the verified backup
   (`sha256=bbc67027…`, byte-identical to `boot_b`), `set_active b`, Android
   boots `_b` in 28 s. `vendor_boot_a`/`vendor_boot_b` untouched.
+- **CI:** run `42542526267` (`00412ff`) is **green**; kernel 17,188,936 B
+  `sha256=39837c299e9e39d2b63b6b7090c87de1fbe24b8f71d92a429162174e111fb5e5`.
+  Commit `7932d10` only touched `shim/` and `tools/`, so the path-filtered
+  workflow did not run (nothing to confirm).
 - **Next action:** (1) fix `shim/ufs.c` command path / MTK vendor init;
   (2) ask the user to approve dumping/backing up and flashing `vendor_boot_a`
   for a full-payload test on slot `a` (LK's `linux,initrd-start` is the
-  vendor ramdisk at `0x66f00000`; the payload must be there). (3) Confirm CI
-  runs `42542526267` (`00412ff`) and the `7932d10` run finished green.
+  vendor ramdisk at `0x66f00000`; the payload must be there).
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
