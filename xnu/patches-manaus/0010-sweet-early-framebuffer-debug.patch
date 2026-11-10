@@ -239,13 +239,6 @@ index 0000000..24bdb39
 +	early_width = (uint32_t)ba->Video.v_width;
 +	early_height = (uint32_t)ba->Video.v_height;
 +	early_stride = (uint32_t)(ba->Video.v_rowBytes / 4);
-+
-+	/* Write a marker to ramoops pmsg zone so Android can see XNU's progress. */
-+	volatile uint32_t *pmsg = (volatile uint32_t *)0x48160000UL;
-+	pmsg[0] = 0x43474244u;	/* sig */
-+	pmsg[1] = 0;		/* start */
-+	pmsg[2] = 12;		/* size */
-+	pmsg[3] = 0x584e5521u;	/* "XNU!" marker */
 +}
 +
 +uint64_t
