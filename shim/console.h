@@ -18,7 +18,7 @@
 #define FB_SIZE_FALLBACK	0x1df0000UL
 #define FB_W			1080
 #define FB_H			2400
-#define FB_STRIDE		(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
+#define FB_STRIDE		4352		/* 1088*4: LK 64-byte aligned pitch (1080*4 sheared) */
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U

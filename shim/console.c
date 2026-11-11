@@ -51,7 +51,7 @@ void con_init(uintptr_t dtb)
 	 * only output. Absent property (sweet) means "assume initialized".
 	 */
 	if (fdt_chosen_u64(dtb, "atag,videolfb-islcm_inited", &lcm))
-		con_off = !lcm;
+		con_off = 0;	/* manaus: force drawing enabled for debug (panel may be on) */
 	else
 		con_off = 0;	/* property absent (sweet): assume LK left it on */
 
