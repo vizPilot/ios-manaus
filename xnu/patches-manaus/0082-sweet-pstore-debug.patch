@@ -4,13 +4,13 @@ Date: Tue, 10 Nov 2026 22:00:00 -0300
 Subject: [PATCH] sweet: write boot stage marker to ramoops pmsg for manaus debug
 
 ---
- osfmk/arm64/sweet_early.c | 6 ++++++
- 1 file changed, 6 insertions(+)
+ osfmk/arm64/sweet_early.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
 
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
-@@ -1,5 +1,11 @@
+@@ -1,1 +1,8 @@
  	early_stride = (uint32_t)(ba->Video.v_rowBytes / 4);
 +	/* PSTORE: write XNU alive marker to ramoops pmsg zone */
 +	volatile uint32_t *pmsg = (volatile uint32_t *)0x48160000UL;
