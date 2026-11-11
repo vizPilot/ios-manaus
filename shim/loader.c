@@ -205,6 +205,20 @@ const char *loader_boot(uintptr_t dtb)
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+	/*
+	 * XNU has no TOPRGU driver: if the shim's watchdog stays armed, the SoC
+	 * resets ~15 s after the jump, before XNU can print anything past the
+	 * early markers. Disarm it here; XNU is responsible for its own resets.
+	 */
+	{
+		volatile uint32_t *mode = (volatile uint32_t *)0x1c007000UL;
+		uint32_t v = *mode;
+		v &= ~(1u << 0);		/* WDT_MODE.EN */
+		v &= ~(1u << 3);		/* WDT_MODE.IRQ_EN */
+		v &= ~(1u << 6);		/* WDT_MODE.DUAL_EN */
+		v |= 0x22000000u;		/* WDT_MODE.KEY */
+		*mode = v;
+	}
 	((xnu_entry_t)entry_pa)(ba_pa);
 	return "xnu returned";
 }

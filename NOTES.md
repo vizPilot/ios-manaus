@@ -97,6 +97,19 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   (2) ask the user to approve dumping/backing up and flashing `vendor_boot_a`
   for a full-payload test on slot `a` (LK's `linux,initrd-start` is the
   vendor ramdisk at `0x66f00000`; the payload must be there).
+- **2026-11-11 WATCHDOG ROOT CAUSE FOUND:** the shim arms the MTK TOPRGU WDT
+  (`wdt_arm(15)`, shim.c:452) and then jumps to XNU. XNU has no TOPRGU driver,
+  so the SoC reset ~15 s after the jump — this was the "immediate reboot"
+  after "SWEET EARLY 20: kprintf startup complete", NOT a panic. Fix:
+  `shim/loader.c` disarms the WDT (clears MODE.EN/IRQ_EN/DUAL_EN, sets the
+  0x22000000 key) immediately before jumping to XNU. Verified on hardware:
+  XNU survives >15 s (user, 2026-11-11). XNU is now responsible for its own
+  resets; a hang needs a manual power-cycle.
+- **Framebuffer stride fix:** the live LK pitch is 64-byte aligned
+  (`FB_STRIDE = 4352`, not 1080*4 = 4320); with 4320 the console text is
+  sheared. `shim/console.h` now uses 4352. Also `con_off = 0` forced in
+  `con_init` (manaus reports islcm_inited=0 but the panel is on and shows
+  the FB).
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
