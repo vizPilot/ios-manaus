@@ -20,6 +20,7 @@ index 7ed604b..d6e47a9 100644
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
 +	sweet_early_mark(20, "kprintf startup complete");
++	kprintf("STAGE21: after early disable\\n");
 +	if (serial_exists) {
 +		sweet_early_disable();
 +	}
