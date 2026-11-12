@@ -10,19 +10,10 @@ Subject: [PATCH] sweet: add stage 21 kprintf after kprintf startup complete
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -537,9 +538,16 @@ arm_init(
- 	PE_consistent_debug_inherit();
- 
- 	/* Setup debugging output. */
-+	sweet_early_mark(16, "calling serial_init");
- 	const unsigned int serial_exists = serial_init();
-+	sweet_early_mark(19, "serial_init returned");
- 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+@@ -1,3 +1,4 @@
  	kprintf("kprintf initialized\n");
- 	sweet_early_mark(20, "kprintf startup complete");
 +	kprintf("STAGE21: after early disable\\n");
+ 	sweet_early_mark(20, "kprintf startup complete");
  	if (serial_exists) {
  		sweet_early_disable();
  	}
- 
- 	serialmode = 0;
