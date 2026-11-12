@@ -448,6 +448,22 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 	struct fb_info fb;
 
+	/*
+	 * Bring-up probe (2026-11-12): paint the panel bright green BEFORE
+	 * anything else. LK hands over ~9-12 s after fastboot reboot; if this
+	 * shows, the shim runs and the panel works, and any later black screen
+	 * is a shim/XNU bug, not an ABL/panel one. Fallback FB constants only:
+	 * con_init has not run yet (the live values matched them on 2026-11-05).
+	 */
+	{
+		volatile uint32_t *fb = (volatile uint32_t *)FB_BASE_FALLBACK;
+		for (uint32_t y = 0; y < FB_H; y++)
+			for (uint32_t x = 0; x < FB_STRIDE / 4; x++)
+				fb[y * (FB_STRIDE / 4) + x] = GREEN;
+		for (volatile uint32_t i = 0; i < 20000000; i++)
+			;	/* ~0.5 s so the flash is visible even if we hang next */
+	}
+
 	/* Reset the SoC if any later step hangs; PSCI below is the fast path. */
 	wdt_arm(15);
 

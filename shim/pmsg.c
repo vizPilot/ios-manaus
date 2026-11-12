@@ -139,6 +139,19 @@ void pmsg_flush(void)
 {
 	if (!loglen)
 		return;
+#if defined(SHIM_MILESTONE_A)
+	/*
+	 * Bring-up probe (2026-11-12): the pmsg zone address is derived from the
+	 * ramoops cmdline layout, not verified on hardware. Write the record to
+	 * every candidate zone so at least one lands in a real pstore zone; a
+	 * hit in the "wrong" zone shows up as its own pstore file and still
+	 * proves the shim ran. Overwriting a console/dmesg zone is harmless.
+	 */
+	write_zone(0x48160000UL, logbuf, loglen);	/* pmsg, record_size-9-zone layout */
+	write_zone(0x480d0000UL, logbuf, loglen);	/* pmsg, console-first layout */
+	write_zone(0x48090000UL, logbuf, loglen);	/* region start canary */
+#else
 	write_zone(PMSG_ADDR, logbuf, loglen);
 	write_zone(CONSOLE_ADDR, logbuf, loglen);
+#endif
 }
