@@ -210,7 +210,19 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   now on MT6879. Because init never exits, XNU never resets, so there is no
   automatic `a`→`b` fallback from this state: returning to Android needs a
   manual Power+VolDown and a restore of `boot_a`/`vendor_boot_a`.
-- **Next after this point (ideas, not done):** capture the full boot text
+- **UFS probe root cause found (2026-11-12, `898f3ad`).** The 2026-11-09
+  `ocs/st=0x0500` was **OCS=5 = `MISMATCH_RESP_UPIU_SIZE`**: the UTRD dw6
+  declared the response UPIU as 512 B (128 DWORDs) while JESD223 fixes it at
+  32 B (8 DWORDs), so the host completed every request with an error and the
+  follow-up commands timed out. `shim/ufs.c` now sets
+  `(RESP_UPIU_OFF/4)<<16 | 8`, reads the SCSI status at the correct byte
+  (`resp[6]`, not `resp[7]`), re-arms a halted UTRL (`UTRLRSR` cleared after
+  an error) before ringing, and mirrors the whole probe (registers, TUR,
+  CAPACITY, GPT, partition names, `UFS DIAG is/hcs/rsr/ocs/r0/r6`) to
+  `pmsg`, so results are readable from Android without photos.
+  Test image (no payload, empty cpio ramdisk → `test_ufs` runs):
+  `shim-ufs1/shim-boot.img` `1b6e4458…` (20,480 B, kernel 9,434 B gz).
+  **Test in flight** on slot `a` with stock `vendor_boot_a`. capture the full boot text
   (`BSD root: md0`, `load_init_program`, PID 1 lines) with a photo + OCR;
   give XNU its own ramoops console so panics survive without photos; then
   follow the sweet roadmap on manaus (fbcon/display, USB Ethernet, root
