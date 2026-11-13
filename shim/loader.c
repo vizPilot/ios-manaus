@@ -203,6 +203,14 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 
+#if SHIM_MILESTONE_B
+	/*
+	 * Milestone B (2026-11-12): payload fully validated and loaded, every
+	 * address reported, but no jump. The caller resets through PSCI.
+	 */
+	return "milestone-b: loaded, no jump";
+#endif
+
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 	/*

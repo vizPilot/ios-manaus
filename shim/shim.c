@@ -88,6 +88,17 @@
 #define SHIM_MILESTONE_A 0
 #endif
 
+/*
+ * Milestone B (2026-11-12): run the whole early path (framebuffer console,
+ * ramoops record, payload load and every address it computes) but return
+ * before the jump to XNU, then warm reset. Combined with the slot-a fallback
+ * this shows the screen state and keeps the pmsg log readable from Android,
+ * without a hang in XNU swallowing it.
+ */
+#ifndef SHIM_MILESTONE_B
+#define SHIM_MILESTONE_B 0
+#endif
+
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
 #define isb() __asm__ volatile("isb" ::: "memory")
@@ -513,6 +524,18 @@ void shim_main(uint64_t dtb)
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+
+#if SHIM_MILESTONE_B
+	/*
+	 * Milestone B (2026-11-12): everything was loaded and reported, but the
+	 * CPU did not jump. Reset through PSCI instead of running the UFS probe
+	 * (its command path still hangs); LK retries a, then boots Android on b,
+	 * and the pmsg log above survives without a fastboot visit.
+	 */
+	pmsg_str("STAGE", "loaded-no-jump");
+	pmsg_flush();
+	reset_now();
+#endif
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
