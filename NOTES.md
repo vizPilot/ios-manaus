@@ -268,13 +268,53 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `DME_HIBER_EXIT` fallback; only then TUR/CAP/READ/GPT. Builds clean
   (`-Wall -Wextra`, 0 ABS64); image `shim-ufs3/shim-boot.img` `0de64842…`
   (20,480 B, v4 `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock
+  `vendor_boot_a` supplies the DTB). **Tested on slot `a` (see below).**
+- **`shim-ufs3` result (2026-11-12, read from pmsg after the `a`→`b`
+  fallback at ~174 s).** The full Linux/MTK bring-up ran but the link still
+  failed. `cntfrq=0xc65d40` (13 MHz); start `ver=0x200 cap=0x3587071f hce=1
+  hcs=0x10f is=4 ie=0x30e75 utrlba=0x512cdc00 dbr=0 nutrs=0x20`,
+  `UEC pa=0x80000011 dl=0x80005800`; MTK `ipver=0x00360000 xoufs=0x02
+  refclk=0x03 opt0=0 mphyctrl=0x07`; `RST ao44=0 ao48=0 pdn44=0 pdn48=0`.
+  `REFCLK rc=0 reg=0x03`; `HCE rc=0 hce=1 hcs=0x08 xoufs=0x82`;
+  `DMERST op=0x14 rc=0 arg2=0`; `DMEEN op=0x12 rc=0 arg2=0`;
+  `LINKUP op=0x16 rc=0 arg2=0x01` ×3 (`hcs=0x08 uecpa=0x80000010`), i.e.
+  **`DME_LINK_STARTUP` returns UIC_CMD_RESULT_FAILURE (arg2=0x01) on all
+  three attempts** and `hcs=0x08` is UICRDY only (no DEVICE_PRESENT).
+  `LINK up=0 dev=0`; `GEAR tx=1 rx=1`; `PWR mode=0x55 lanes=1`;
+  `H8EXIT op=0x18 rc=0 arg2=0x01`; `LINK2 up=0 hcs=0x08`; `ours=0x40017400
+  rsr=1`. TUR now **times out** (`rc=1 ocs/st=0x0000`), `DIAG is=0x01
+  hcs=0x08 rsr=1 ocs=0x0f r0..r7=0`; `STAGE=done`. So host reset is *not* the
+  fix: UIC commands complete (UniPro/DME alive) but the PHY never links.
+- **The only UFS-specific setup Linux does that the shim does not is enabling
+  the DT clocks (CCF).** Vendor `ufs_mtk_host_reset` resets only
+  hci/crypto/unipro (matches manaus); vendor MPHY is `NULL` on manaus (no
+  `phys` in the DT), so no MPHY driver/SMC; vendor `pre_link`/`hce_enable_notify`
+  match the shim. With UIC working but link startup failing with a PHY error,
+  the prime suspect is the **MPHY AO clock gates** left gated by ABL.
+- **Clock-gate semantics (vendor `clk-mt6879-peri.c`).**
+  `mediatek,mt6879-ufs_ao_config` (syscon@112b8000) and
+  `mediatek,mt6879-ufs_pdn_cfg` (syscon@112bc000) are set/clr/status gate banks
+  at **byte** offsets 0x4/0x8/0xc (`regmap-mmio` uses `ctx->regs + reg`). With
+  `mtk_clk_gate_ops_setclr` a gate is **enabled by writing BIT to the clr
+  register (0x8)**; the status bit (0xc) reads 1 while gated. AO gates: bit1
+  `phy_sap`, bit3 `tx_symbol`, bit4 `rx_symbol`, bit5 `rx_sym1` (mask 0x3A).
+  PDN gates: bit1 `unipro_sck`, bit2 `unipro_tick`, bit3 `u_ck`, bit4 `aes_u`,
+  bit5 `u_tick` (mask 0x3E). Topckgen (phandle 0x02 = syscon@10000000) supplies
+  `ufs_fde`/`ufs` muxes; UIC works so `ufs_ck` is on and those muxes are likely
+  fine.
+- **`shim/ufs.c` v3 (image `shim-ufs4`), 2026-11-12.** Adds `ufs_clocks_on()`,
+  called before `refclk_on()`: logs the AO/PDN status bytes, writes the CLR
+  masks (0x3A/0x3E), waits 20 µs and logs the status again, so pmsg shows
+  whether ABL really left any gate closed. Builds clean (`-Wall -Wextra`,
+  0 ABS64, `out/Image.gz` 10,792 B); image `shim-ufs4/shim-boot.img` `1a352a4b…`
+  (20,480 B, v4 `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock
   `vendor_boot_a` supplies the DTB). **Test pending** on slot `a`.
-- **Next if `shim-ufs3` still fails:** escalate to the MPHY. Mainline's
-  `mediatek,mt8183-ufsphy` node is absent from the manaus DT (only USB phys
-  exist), so the vendor kernel drives the MPHY through the controller/firmware;
-  the remaining candidates are `REG_UFS_MPHYCTRL` (0x2200), a firmware SMC
-  (`ufs_mtk_mphy_ctrl`), or the MTK `ufs_mtk_host_reset` reset lines if my
-  offset/bit reading is wrong.
+- **Next if `shim-ufs4` (clock gates) still fails:** escalate to the MPHY.
+  Mainline's `mediatek,mt8183-ufsphy` node is absent from the manaus DT (only
+  USB phys exist), so the vendor kernel drives the MPHY through the
+  controller/firmware; the remaining candidates are `REG_UFS_MPHYCTRL` (0x2200),
+  a firmware SMC (`ufs_mtk_mphy_ctrl`), or the MTK `ufs_mtk_host_reset` reset
+  lines if my offset/bit reading is wrong.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on

@@ -115,6 +115,24 @@
 #define RST_ASSERT	0x44
 #define RST_DEASSERT	0x48
 
+/*
+ * UFS clock gates (drivers/clk/mediatek/clk-mt6879-peri.c, clk-mt6879-peri).
+ * Both syscons are set/clr/status gate banks at byte offsets 0x4/0x8/0xc.
+ * With mtk_clk_gate_ops_setclr a gate is *enabled* by writing BIT to the clr
+ * register (enable -> mtk_cg_clr_bit) and the status bit reads 1 while gated.
+ * Linux enables all of these in ufs_mtk_init_clocks before it touches the
+ * controller; ABL may leave the MPHY clocks gated after loading the kernel,
+ * which would explain a UniPro that answers UIC but a PHY that never links.
+ */
+#define UFSAO_GATE_CLR	0x8
+#define UFSAO_GATE_STA	0xc
+#define UFSPDN_GATE_CLR	0x8
+#define UFSPDN_GATE_STA	0xc
+/* ufsao: bit1 phy_sap, bit3 tx_symbol, bit4 rx_symbol, bit5 rx_sym1 */
+#define UFSAO_GATE_MASK	((1u << 1) | (1u << 3) | (1u << 4) | (1u << 5))
+/* ufspdn: bit1 unipro_sck, bit2 unipro_tick, bit3 u_ck, bit4 aes_u, bit5 u_tick */
+#define UFSPDN_GATE_MASK ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5))
+
 #define BLOCK		4096u
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
@@ -243,6 +261,11 @@ static inline void sc_set(uintptr_t base, uint32_t off, uint32_t mask)
 	*(volatile uint32_t *)(base + off) = sc_rd(base, off) | mask;
 }
 
+static inline void sc_wr(uintptr_t base, uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(base + off) = v;
+}
+
 /* One DME_SET / DME_GET (ARG1 = attr<<16; DME_SET value in ARG3). */
 static uint32_t dme_set(uint32_t attr, uint32_t val, uint32_t *a2)
 {
@@ -327,6 +350,21 @@ static uint32_t refclk_on(void)
 		delay_us(10);
 	}
 	return 1;
+}
+
+/*
+ * ufs_mtk_init_clocks(): ungate the UFS AO (MPHY: phy_sap/tx_symbol/rx_symbol/
+ * rx_sym1) and PDN (unipro_sck/unipro_tick/u_ck/aes_u/u_tick) clocks. A gate
+ * bit reads 1 while gated, so log the status before and after to see whether
+ * ABL really left any of them off.
+ */
+static void ufs_clocks_on(void)
+{
+	ufs_log2("UFS CLK", "ao_sta=", sc_rd(SYSCON_AO, UFSAO_GATE_STA), "pdn_sta=", sc_rd(SYSCON_PDN, UFSPDN_GATE_STA));
+	sc_wr(SYSCON_AO, UFSAO_GATE_CLR, UFSAO_GATE_MASK);
+	sc_wr(SYSCON_PDN, UFSPDN_GATE_CLR, UFSPDN_GATE_MASK);
+	delay_us(20);
+	ufs_log2("UFS CLK", "ao_sta=", sc_rd(SYSCON_AO, UFSAO_GATE_STA), "pdn_sta=", sc_rd(SYSCON_PDN, UFSPDN_GATE_STA));
 }
 
 /* ufs_mtk_pre_link: non-LPM, disable host TX LCC, clear deep stall. */
@@ -534,9 +572,12 @@ void test_ufs(void)
 	/*
 	 * ABL leaves the controller enabled but the UniPro link half-broken
 	 * (PWR_LOCAL, UECPA pending). Replicate the Linux/MTK probe sequence:
-	 * reference clock on, host reset + HCE, DME reset/enable, pre_link,
-	 * then DME_LINK_STARTUP with the retry loop.
+	 * ungate the UFS clocks (Linux ufs_mtk_init_clocks; the MPHY AO gates
+	 * may still be gated by ABL), reference clock on, host reset + HCE,
+	 * DME reset/enable, pre_link, then DME_LINK_STARTUP with the retry loop.
 	 */
+	ufs_clocks_on();
+
 	uint32_t rc = refclk_on();
 	ufs_log2("UFS REFCLK", "rc=", rc, "reg=", ufs_rd(REG_MTK_REFCLK_CTRL));
 
