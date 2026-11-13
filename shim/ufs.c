@@ -12,10 +12,22 @@
  */
 #include <stdint.h>
 #include "console.h"
+#include "pmsg.h"
 #include "ufs.h"
 
 #define UFS_BASE	0x112b0000UL	/* ufshci@112b0000, manaus live FDT */
 #define UFS_LUN		2		/* sdc = 0:0:0:2 (measured 2026-11-08) */
+
+/*
+ * JESD223: the Response UPIU is exactly 32 bytes. The UTRD must declare that
+ * length (in DWORDs) in dw6[15:0]; declaring more makes the host complete the
+ * request with OCS=5 (MISMATCH_RESP_UPIU_SIZE). That was the 2026-11-09
+ * `ocs/st=0x0500` failure: dw6 declared 512 B instead of 32 B.
+ */
+#define RESP_UPIU_OFF	512u			/* inside the UCD, 128-byte aligned */
+#define RESP_UPIU_BYTES	32u
+#define RESP_UPIU_DW	(RESP_UPIU_BYTES / 4u)
+#define STATUS_BYTE	6u			/* SCSI status inside the response UPIU */
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
@@ -61,6 +73,26 @@ struct ucd {
 static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
 static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
+
+/* State of the last failed command, mirrored to pmsg by test_ufs(). */
+static struct {
+	uint32_t is, hcs, rsr, ocs;
+	uint8_t resp[8];
+} diag;
+
+static void ufs_log2(const char *label, const char *a, uint64_t va, const char *b, uint64_t vb)
+{
+	con_hex2(label, a, va, b, vb);
+	pmsg_hex2(label, a, va, b, vb);
+	pmsg_flush();
+}
+
+static void ufs_log1(const char *label, const char *val)
+{
+	con_str(label, val);
+	pmsg_str(label, val);
+	pmsg_flush();
+}
 
 static uint64_t ticks(void)
 {
@@ -109,7 +141,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
-	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	utrl[0].resp = (RESP_UPIU_OFF / 4) << 16 | RESP_UPIU_DW;
 	if (len) {
 		uintptr_t buf_pa = (uintptr_t)buf;
 		ucd.prdt[0].addr_lo = (uint32_t)buf_pa;
@@ -119,17 +151,38 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 
+	/* An OCS error can halt the list (UTRLRSR -> 0): re-arm it before ringing. */
+	if (!(ufs_rd(REG_UTRLRSR) & 1)) {
+		ufs_wr(REG_UTRLBA, (uint32_t)(uintptr_t)utrl);
+		ufs_wr(REG_UTRLBAU, (uint32_t)((uintptr_t)utrl >> 32));
+		ufs_wr(REG_UTRLRSR, 1);
+	}
+
 	ufs_wr(REG_UTRLDBR, 1);
 	uint64_t start = ticks();
 	while (ufs_rd(REG_UTRLDBR) & 1) {
 		if (ticks() - start > 19200000) {	/* 1 s */
+			diag.is = ufs_rd(REG_IS);
+			diag.hcs = ufs_rd(REG_HCS);
+			diag.rsr = ufs_rd(REG_UTRLRSR);
+			diag.ocs = utrl[0].dw2 & 0xff;
+			for (unsigned i = 0; i < 8; i++)
+				diag.resp[i] = ucd.resp[i];
 			ufs_wr(REG_UTRLCLR, ~1u);	/* clear slot 0 (write 0 to the bit) */
 			return 1;			/* timeout */
 		}
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	*ocs_out = utrl[0].dw2 & 0xff;
-	*status_out = ucd.resp[7];		/* SCSI status in the response UPIU */
+	*status_out = ucd.resp[STATUS_BYTE];	/* SCSI status in the response UPIU */
+	if (*ocs_out) {
+		diag.is = ufs_rd(REG_IS);
+		diag.hcs = ufs_rd(REG_HCS);
+		diag.rsr = ufs_rd(REG_UTRLRSR);
+		diag.ocs = *ocs_out;
+		for (unsigned i = 0; i < 8; i++)
+			diag.resp[i] = ucd.resp[i];
+	}
 	if (*ocs_out)
 		return 2;
 	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
@@ -187,31 +240,40 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		name[16] = 0;
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
-		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
+		ufs_log2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
 		if (!__builtin_strcmp(name, "userdata") || !__builtin_strcmp(name, "cust") ||
 		    !__builtin_strcmp(name, "cache"))
-			con_str(" fs", fs_type((uint32_t)first));
+			ufs_log1(" fs", fs_type((uint32_t)first));
 	}
+}
+
+static void ufs_diag_dump(uint32_t rc)
+{
+	ufs_log2("UFS DIAG", "is=", diag.is, "hcs=", diag.hcs);
+	ufs_log2("UFS DIAG", "rsr=", diag.rsr, "ocs=", diag.ocs);
+	ufs_log2("UFS DIAG", "r0=", diag.resp[0], "r6=", diag.resp[6]);
+	ufs_log1("UFS DIAG", rc == 1 ? "timeout" : "ocs error");
 }
 
 void test_ufs(void)
 {
-	con_str("UFS", "milestone 5 probe (read-only)");
-	con_hex("UFSBASE", UFS_BASE);
-	con_str("UFS", "reading controller registers");
+	ufs_log1("UFS", "milestone 5 probe (read-only)");
+	pmsg_hex("UFSBASE", UFS_BASE);
+	pmsg_flush();
+	ufs_log1("UFS", "reading controller registers");
 	uint32_t cap = ufs_rd(REG_CAP), hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
-	con_hex2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
-	con_hex2("UFS", "hce=", hce, "hcs=", hcs);
-	con_hex2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
-	con_hex2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
-	con_hex2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
+	ufs_log2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
+	ufs_log2("UFS", "hce=", hce, "hcs=", hcs);
+	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
+	ufs_log2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
+	ufs_log2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
 
 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
-		con_str("UFS", "host not enabled/ready: stop");
+		ufs_log1("UFS", "host not enabled/ready: stop");
 		return;
 	}
 	if (ufs_rd(REG_UTRLDBR)) {
-		con_str("UFS", "requests outstanding: stop");
+		ufs_log1("UFS", "requests outstanding: stop");
 		return;
 	}
 
@@ -221,14 +283,14 @@ void test_ufs(void)
 	ufs_wr(REG_UTRLBA, (uint32_t)list);
 	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
 	ufs_wr(REG_UTRLRSR, 1);
-	con_hex2("UFS", "ours=", (uint32_t)list, "rsr=", ufs_rd(REG_UTRLRSR));
+	ufs_log2("UFS", "ours=", (uint32_t)list, "rsr=", ufs_rd(REG_UTRLRSR));
 	/*
 	 * Never ring a doorbell unless the host really uses our list: otherwise
 	 * it would execute whatever ABL left in its own slot 0 (maybe a write).
 	 */
 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
 	    !(ufs_rd(REG_UTRLRSR) & 1)) {
-		con_str("UFS", "list base not taken: stop");
+		ufs_log1("UFS", "list base not taken: stop");
 		return;
 	}
 
@@ -237,33 +299,37 @@ void test_ufs(void)
 	/* A first command may report a unit attention; retry a few times. */
 	for (int i = 0; i < 3; i++) {
 		rc = scsi(UFS_LUN, tur, sizeof(tur), 0, 0, &ocs, &st);
-		con_hex2("UFS TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
+		ufs_log2("UFS TUR", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 		if (!rc)
 			break;
 	}
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
 	rc = scsi(UFS_LUN, cap10, sizeof(cap10), data, 8, &ocs, &st);
-	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
+	ufs_log2("UFS CAP", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 	if (!rc)
-		con_hex2("UFS LUN2", "lastlba=", be32(data), "blk=", be32(data + 4));
+		ufs_log2("UFS LUN2", "lastlba=", be32(data), "blk=", be32(data + 4));
+	else
+		ufs_diag_dump(rc);
 
 	/* READ(10) LBA 0, 2 blocks: protective MBR and the GPT header. */
 	static const uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
 	rc = scsi(UFS_LUN, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
-	con_hex2("UFS READ", "rc=", rc, "ocs/st=", ocs << 8 | st);
-	if (rc)
+	ufs_log2("UFS READ", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
+	if (rc) {
+		ufs_diag_dump(rc);
 		return;
-	con_hex2("UFS MBR", "sig=", data[510] | data[511] << 8, "type=", data[450]);
+	}
+	ufs_log2("UFS MBR", "sig=", data[510] | data[511] << 8, "type=", data[450]);
 	const uint8_t *gpt = data + BLOCK;
 	char sig[9];
 	for (int i = 0; i < 8; i++)
 		sig[i] = (gpt[i] >= 32 && gpt[i] < 127) ? gpt[i] : '.';
 	sig[8] = 0;
-	con_str("UFS GPT", sig);
+	ufs_log1("UFS GPT", sig);
 	uint32_t nent = gpt[80] | gpt[81] << 8 | gpt[82] << 16, esz = gpt[84] | gpt[85] << 8;
 	uint32_t elba = gpt[72] | gpt[73] << 8;
-	con_hex2("UFS GPT", "entries=", nent, "lba=", elba);
+	ufs_log2("UFS GPT", "entries=", nent, "lba=", elba);
 	if (esz != 128 || nent > 128)
 		return;
 	list_partitions(elba, nent);
