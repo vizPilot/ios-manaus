@@ -111,10 +111,82 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `con_init` (manaus reports islcm_inited=0 but the panel is on and shows
   the FB).
 
+**2026-11-12: slot `a` is NOT dead, fastboot wipes ramoops, packaging bug found.**
+- **Slot `a` boots LK and the Linux kernel.** It only fails *Android*:
+  `console-ramoops-0` of a stock-`a` attempt shows
+  `init: [libfs_avb]: Error verifying vbmeta image: invalid vbmeta header`,
+  `device-mapper: verity: metadata block 169588 is corrupted`,
+  `reboot: Restarting system with command 'dm-verity device corrupted'`
+  (i.e. `system_a` verity is corrupt, the boot chain is fine). Slot `a` is
+  therefore usable as the disposable test slot: the shim runs there long
+  before Android/verity matter.
+- **Automatic `a`→`b` fallback re-verified (2026-11-12):** 6 retries,
+  Android returns on `_b` in ~132 s with no user action and no fastboot visit.
+  `slot-unbootable:_a` stays `no`; `slot-successful:_a` is `no`.
+- **A fastboot visit wipes the ramoops region.** Proven with zero risk: a
+  unique marker written to `/dev/pmsg0` did not survive `fastboot flash` of
+  the stock image over itself + reboot (`/sys/fs/pstore/` came back empty).
+  Evidence can only be read after the automatic fallback, never after a
+  restore flash. (Consistent with the 2026-11-09 note.)
+- **Root cause of the 2026-11-12 black screens (no shim, no green flash):**
+  `tools/mkbootimg-manaus.sh` was called with `manaus.adt` in the **DTB**
+  argument position, so the generated `vendor_boot` carried an invalid "DTB"
+  and LK failed *before* the kernel. Signature is
+  `shim-bootimg.sh SHIM_IMAGE PAYLOAD_BIN DTB OUTDIR` (`--mode v4` optional).
+  Never pass `manaus.adt` there; pass the stock DTB blob.
+- **Stock DTB blob for `vendor_boot` rebuilds:** 249,100 B at offset
+  **26,447,872** of `vendor_boot_b-fresh.img` = 64-byte Motorola prefix
+  (`d7b7ab1e0003cd0c…`) + FDT (`d00dfeed` at +64, `totalsize` 249,036).
+  Keep the prefix: `dtb_size` in the stock header is 249,100. Extract with
+  `python3` (not `dd bs=1`, too slow) to
+  `wsl-work/mt6879-dtbblob.bin`; `bootimg.py info` must then report
+  `dtb_size 249100`, `dtb_addr 0x47c80000`.
+- **Milestone A re-verified on hardware (2026-11-12):** flashed **only**
+  `boot_a` (milestone shim) with stock `vendor_boot_a`, `set_active a`.
+  Android returned automatically at ~132 s on `_b`, and `pmsg-ramoops-0`
+  (93 B) held `SHIM=manaus milestone 1 entry`, `EL=0x0000000000000001`,
+  `DTB=0x0000000047c80000`, `STAGE=early-reset`. The shim executes.
+- **pmsg candidate zones** used by the milestone probe in `shim/pmsg.c`:
+  `0x48160000`, `0x480d0000`, `0x48090000`. Ramoops cmdline region
+  `0x48090000`+`0xe0000` (console `0x40000`, pmsg `0x10000`). Which one LK
+  actually hands to Linux is not pinned down; the probe writes to all three.
+- Commits: `0a4f10f` (drop obsolete debug patches 0082/0083), `515a915`
+  (green-flash probe + milestone pmsg probe to the candidate zones),
+  `a218379` (`SHIM_MILESTONE_B`: load and report the payload, reset before
+  jumping), `a078a9e` (green flash lasts `delay_ms(1500)` instead of ~30 ms).
+- **Milestone B (load, report, no jump) SUCCEEDED on hardware (2026-11-12):**
+  flashed `boot_a` = `shim-xnu-mileb/shim-boot.img` (`11ef6d9b…`) +
+  `vendor_boot_a` = `shim-vendor_boot.img` (`a0fb516a…`, `dtb_size 249100`),
+  `set_active a`. Android returned automatically at **~84 s** on `_b` (no
+  fastboot visit). `pmsg-ramoops-0` (660 B) proves the whole early path:
+  `EL=1`, `DTB=0x47c80000`, `FBBASE=0xfe0d0000`, `FBSIZE=0x1df0000`,
+  **`LCM=inited`** (panel + framebuffer OK), `INITRD 0x66f00000..0x68ea6e5c`
+  (LK publishes the *vendor* ramdisk as initrd), `PAYLOAD off=0 nsegs=10`,
+  `PHYS base=0x40000000 size=0xa3ff8000`, `VIRT=0xfffffe0006000000`,
+  `ENTRY=0xfffffe000748c488`, `SEGS end=0x424c4000`,
+  `BOOTARG pa=0x424c8000 top=0x424cc000`, `JUMP=0x14148c488`, then
+  `LOADER=milestone-b: loaded, no jump`, `STAGE=loaded-no-jump`.
+  So LK accepts the rebuilt `vendor_boot` with the stock DTB blob, the payload
+  is found and fully validated, and only the jump remains.
+- **The green flash was invisible for a mundane reason:** the probe spun
+  20,000,000 volatile increments ≈ a few tens of ms on an A76, not the ~0.5 s
+  the comment claimed. Fixed in `a078a9e`: it now paints the panel and calls
+  `delay_ms(1500)` (`cntpct_el0`; no-op if LK left `cntfrq_el0` at 0). The
+  milestone-B image above was built *before* this fix, which is why no flash
+  was seen even though the shim ran.
+- **Restore verified after milestone B:** `boot_a` `bbc67027…` and
+  `vendor_boot_a` `5d28026c…` are byte-identical to the backups (on-device
+  `sha256sum`), `set_active b`, Android boots `_b`.
+- **Next:** the real jump test on slot `a` (milestone B off, same correct
+  `vendor_boot`, green flash now visible) — XNU itself owns the WDT reset
+
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
 `boot_a` (after backing it up) for the slot-fallback experiment only; it does
-**not** cover `vendor_boot_a`.
+**not** cover `vendor_boot_a`. The 2026-11-12 exception extends it to
+`vendor_boot_a` **only** with a verified backup and the stock DTB blob
+(`boot_a`/`vendor_boot_a` backups: `boot_a.img` `bbc67027…`,
+`vendor_boot_a.img` `5d28026c…`).
 
 ---
 
