@@ -12,22 +12,24 @@
  */
 #include <stdint.h>
 #include "console.h"
-#include "pmsg.h"
 #include "ufs.h"
 
 #define UFS_BASE	0x112b0000UL	/* ufshci@112b0000, manaus live FDT */
 #define UFS_LUN		2		/* sdc = 0:0:0:2 (measured 2026-11-08) */
 
 /*
- * JESD223: the Response UPIU is exactly 32 bytes. The UTRD must declare that
- * length (in DWORDs) in dw6[15:0]; declaring more makes the host complete the
- * request with OCS=5 (MISMATCH_RESP_UPIU_SIZE). That was the 2026-11-09
- * `ocs/st=0x0500` failure: dw6 declared 512 B instead of 32 B.
+ * Linux uses ALIGNED_UPIU_SIZE = 512 B and declares exactly that (128 DWORDs)
+ * in the UTRD dw6[15:0]; the response offset is the UCD's response_upiu field
+ * in DWORDs (512/4 = 128). Match it.
+ *
+ * The 2026-11-09/12 `ocs/st=0x0500` is OCS=5 = OCS_PEER_COMM_FAILURE (the
+ * device did not answer the UPIU), NOT a response-size mismatch: declaring
+ * 8 DWORDs behaved exactly like 128. The fault is a layer below the UTRD.
  */
-#define RESP_UPIU_OFF	512u			/* inside the UCD, 128-byte aligned */
-#define RESP_UPIU_BYTES	32u
+#define RESP_UPIU_OFF	512u			/* response UPIU offset in the UCD, in DWORDs: 128 */
+#define RESP_UPIU_BYTES	512u
 #define RESP_UPIU_DW	(RESP_UPIU_BYTES / 4u)
-#define STATUS_BYTE	6u			/* SCSI status inside the response UPIU */
+#define STATUS_BYTE	7u			/* SCSI status in the response UPIU header */
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
@@ -39,15 +41,38 @@
 #define REG_UTRLDBR	0x58
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
+#define REG_UECPA	0x38	/* UIC error code, PHY adapter layer */
+#define REG_UECDL	0x3c	/* UIC error code, data link layer */
+#define REG_UECN	0x40	/* UIC error code, network layer */
+#define REG_UECT	0x44	/* UIC error code, transport layer */
+#define REG_UECDME	0x48	/* UIC error code, DME */
+#define REG_UIC_CMD	0x90
+#define REG_UIC_ARG1	0x94
+#define REG_UIC_ARG2	0x98
+#define REG_UIC_ARG3	0x9c
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
 #define HCS_UCRDY	(1u << 3)
 
+/* Interrupt Status (JESD223 IS, 20h): write 1 to clear. */
+#define IS_UTRCS	(1u << 0)	/* UTP transfer request completed */
+#define IS_UIC_ERR	(1u << 2)
+#define IS_UIC_PWR	(1u << 4)
+#define IS_UIC_LINKUP	(1u << 8)
+#define IS_UIC_COMPL	(1u << 10)	/* UIC command completed */
+#define IS_DEV_FATAL	(1u << 11)
+
+/* UIC DME commands (JESD223 uic_cmd_dme). */
+#define UIC_DME_LINK_STARTUP	0x16
+#define UIC_DME_HIBER_EXIT	0x18
+
 #define BLOCK		4096u
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
 static inline void ufs_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(UFS_BASE + off) = v; }
+
+static uint64_t ticks(void);
 
 /* UTP transfer request descriptor (32 bytes). */
 struct utrd {
@@ -74,24 +99,67 @@ static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
 static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
 
-/* State of the last failed command, mirrored to pmsg by test_ufs(). */
+/* State of the last failed command, dumped by ufs_diag_dump(). */
 static struct {
 	uint32_t is, hcs, rsr, ocs;
-	uint8_t resp[8];
+	uint8_t resp[16];
 } diag;
 
+/*
+ * con_str()/con_hex2() already mirror every line into the ramoops pmsg log
+ * (console.c), so these helpers must NOT also call pmsg_* or every line lands
+ * twice in the record.
+ */
 static void ufs_log2(const char *label, const char *a, uint64_t va, const char *b, uint64_t vb)
 {
 	con_hex2(label, a, va, b, vb);
-	pmsg_hex2(label, a, va, b, vb);
-	pmsg_flush();
 }
 
 static void ufs_log1(const char *label, const char *val)
 {
 	con_str(label, val);
-	pmsg_str(label, val);
-	pmsg_flush();
+}
+
+/*
+ * One UIC command (DME_*): arguments into ARG_1..3, opcode into UIC_CMD, then
+ * wait for the completion interrupt bit. Returns 0 on completion (even when
+ * the DME result is an error), 1 on timeout. *cmd_out carries the raw UIC_CMD
+ * register (command status in bits [31:24]), *arg2_out the DME result
+ * (MASK_UIC_COMMAND_RESULT = low byte) and *arg3_out the generic error code.
+ */
+static uint32_t uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
+    uint32_t *cmd_out, uint32_t *arg2_out, uint32_t *arg3_out)
+{
+	ufs_wr(REG_IS, ufs_rd(REG_IS));		/* RW1C: clear whatever is pending */
+	ufs_wr(REG_UIC_ARG1, a1);
+	ufs_wr(REG_UIC_ARG2, a2);
+	ufs_wr(REG_UIC_ARG3, a3);
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UIC_CMD, op & 0xff);
+	uint64_t start = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UIC_COMPL)) {
+		if (ticks() - start > 19200000) {	/* 1 s */
+			*cmd_out = ufs_rd(REG_UIC_CMD);
+			*arg2_out = ufs_rd(REG_UIC_ARG2);
+			*arg3_out = ufs_rd(REG_UIC_ARG3);
+			return 1;
+		}
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	*cmd_out = ufs_rd(REG_UIC_CMD);
+	*arg2_out = ufs_rd(REG_UIC_ARG2);
+	*arg3_out = ufs_rd(REG_UIC_ARG3);
+	ufs_wr(REG_IS, IS_UIC_COMPL);
+	return 0;
+}
+
+static void uic_log(const char *tag, uint32_t op, uint32_t rc, uint32_t cmd, uint32_t a2, uint32_t a3)
+{
+	ufs_log2(tag, "op=", op, "rc=", rc);
+	ufs_log2(tag, "cmd=", cmd, "arg2=", a2);
+	ufs_log2(tag, "arg3=", a3, "hcs=", ufs_rd(REG_HCS));
+	ufs_log2(tag, "is=", ufs_rd(REG_IS), "uecpa=", ufs_rd(REG_UECPA));
+	ufs_log2(tag, "uecdl=", ufs_rd(REG_UECDL), "uecdme=", ufs_rd(REG_UECDME));
 }
 
 static uint64_t ticks(void)
@@ -166,7 +234,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 			diag.hcs = ufs_rd(REG_HCS);
 			diag.rsr = ufs_rd(REG_UTRLRSR);
 			diag.ocs = utrl[0].dw2 & 0xff;
-			for (unsigned i = 0; i < 8; i++)
+			for (unsigned i = 0; i < 16; i++)
 				diag.resp[i] = ucd.resp[i];
 			ufs_wr(REG_UTRLCLR, ~1u);	/* clear slot 0 (write 0 to the bit) */
 			return 1;			/* timeout */
@@ -180,7 +248,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 		diag.hcs = ufs_rd(REG_HCS);
 		diag.rsr = ufs_rd(REG_UTRLRSR);
 		diag.ocs = *ocs_out;
-		for (unsigned i = 0; i < 8; i++)
+		for (unsigned i = 0; i < 16; i++)
 			diag.resp[i] = ucd.resp[i];
 	}
 	if (*ocs_out)
@@ -251,22 +319,24 @@ static void ufs_diag_dump(uint32_t rc)
 {
 	ufs_log2("UFS DIAG", "is=", diag.is, "hcs=", diag.hcs);
 	ufs_log2("UFS DIAG", "rsr=", diag.rsr, "ocs=", diag.ocs);
-	ufs_log2("UFS DIAG", "r0=", diag.resp[0], "r6=", diag.resp[6]);
+	ufs_log2("UFS DIAG", "r0=", diag.resp[0], "r2=", diag.resp[2]);
+	ufs_log2("UFS DIAG", "r6=", diag.resp[6], "r7=", diag.resp[7]);
 	ufs_log1("UFS DIAG", rc == 1 ? "timeout" : "ocs error");
 }
 
 void test_ufs(void)
 {
 	ufs_log1("UFS", "milestone 5 probe (read-only)");
-	pmsg_hex("UFSBASE", UFS_BASE);
-	pmsg_flush();
-	ufs_log1("UFS", "reading controller registers");
+	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
 	uint32_t cap = ufs_rd(REG_CAP), hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
 	ufs_log2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
 	ufs_log2("UFS", "hce=", hce, "hcs=", hcs);
 	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
 	ufs_log2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
 	ufs_log2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
+	ufs_log2("UFS UEC", "pa=", ufs_rd(REG_UECPA), "dl=", ufs_rd(REG_UECDL));
+	ufs_log2("UFS UEC", "net=", ufs_rd(REG_UECN), "tr=", ufs_rd(REG_UECT));
+	ufs_log2("UFS UEC", "dme=", ufs_rd(REG_UECDME), "is=", ufs_rd(REG_IS));
 
 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
 		ufs_log1("UFS", "host not enabled/ready: stop");
@@ -276,6 +346,16 @@ void test_ufs(void)
 		ufs_log1("UFS", "requests outstanding: stop");
 		return;
 	}
+
+	/*
+	 * Linux always starts the UniPro link on init (ufshcd_link_startup ->
+	 * DME_LINK_STARTUP); ABL's leftover state can leave the device off the
+	 * link even while HCS says the controller is ready. That is the prime
+	 * suspect for OCS=5 (PEER_COMM_FAILURE) on the first command.
+	 */
+	uint32_t ucmd = 0, ua2 = 0, ua3 = 0, urc;
+	urc = uic_cmd(UIC_DME_LINK_STARTUP, 0, 0, 0, &ucmd, &ua2, &ua3);
+	uic_log("UFS LINKUP", UIC_DME_LINK_STARTUP, urc, ucmd, ua2, ua3);
 
 	/* Take over the transfer request list: stop, point at ours, run. */
 	ufs_wr(REG_UTRLRSR, 0);
@@ -302,6 +382,13 @@ void test_ufs(void)
 		ufs_log2("UFS TUR", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 		if (!rc)
 			break;
+	}
+	/* Still failing: try waking the link out of Hibern8 and retry once. */
+	if (rc) {
+		urc = uic_cmd(UIC_DME_HIBER_EXIT, 0, 0, 0, &ucmd, &ua2, &ua3);
+		uic_log("UFS H8EXIT", UIC_DME_HIBER_EXIT, urc, ucmd, ua2, ua3);
+		rc = scsi(UFS_LUN, tur, sizeof(tur), 0, 0, &ocs, &st);
+		ufs_log2("UFS TUR2", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 	}
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */

@@ -210,23 +210,38 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   now on MT6879. Because init never exits, XNU never resets, so there is no
   automatic `a`→`b` fallback from this state: returning to Android needs a
   manual Power+VolDown and a restore of `boot_a`/`vendor_boot_a`.
-- **UFS probe root cause found (2026-11-12, `898f3ad`).** The 2026-11-09
-  `ocs/st=0x0500` was **OCS=5 = `MISMATCH_RESP_UPIU_SIZE`**: the UTRD dw6
-  declared the response UPIU as 512 B (128 DWORDs) while JESD223 fixes it at
-  32 B (8 DWORDs), so the host completed every request with an error and the
-  follow-up commands timed out. `shim/ufs.c` now sets
-  `(RESP_UPIU_OFF/4)<<16 | 8`, reads the SCSI status at the correct byte
-  (`resp[6]`, not `resp[7]`), re-arms a halted UTRL (`UTRLRSR` cleared after
-  an error) before ringing, and mirrors the whole probe (registers, TUR,
-  CAPACITY, GPT, partition names, `UFS DIAG is/hcs/rsr/ocs/r0/r6`) to
-  `pmsg`, so results are readable from Android without photos.
-  Test image (no payload, empty cpio ramdisk → `test_ufs` runs):
-  `shim-ufs1/shim-boot.img` `1b6e4458…` (20,480 B, kernel 9,434 B gz).
-  **Test in flight** on slot `a` with stock `vendor_boot_a`. capture the full boot text
-  (`BSD root: md0`, `load_init_program`, PID 1 lines) with a photo + OCR;
-  give XNU its own ramoops console so panics survive without photos; then
-  follow the sweet roadmap on manaus (fbcon/display, USB Ethernet, root
-  image).
+- **UFS probe: the `898f3ad` root cause was WRONG (corrected 2026-11-12).**
+  The 2026-11-09 `ocs/st=0x0500` is **OCS=5 = `OCS_PEER_COMM_FAILURE`**
+  (Linux `enum utp_ocs`: 0 success … 4 `MISMATCH_RESP_UPIU_SIZE`,
+  **5 `PEER_COMM_FAILURE`**, 0xF invalid), not a response-size mismatch. The
+  re-run with `dw6 = 8` DWORDs (commit `898f3ad`) produced the *same*
+  `OCS=5`, proving the UTRD length was never the fault. `RESP_UPIU` is back
+  to 512 B / 128 DWORDs (Linux `ALIGNED_UPIU_SIZE`), matching
+  `response_upiu_offset = response_upiu_length = 512>>2`.
+  `data_direction = 2` (`UTP_DEVICE_TO_HOST`) for reads is also confirmed
+  correct against the Linux enum. The real failure is a layer below the UTRD:
+  the device does not answer the UPIU.
+- **Link/UIC evidence (re-run, `898f3ad`):** start `is=0x04` = **UIC_ERROR
+  pending before the shim touches anything**; `hcs=0x10f` = DEVICE_PRESENT |
+  UTRL ready | UTMR ready | UIC ready | power-mode-status 1 (**PWR_LOCAL**,
+  not 0/PWR_OK). After the failed command `is=0x815` = UTRCS | UIC_ERROR |
+  UIC_POWER_MODE | **DEVICE_FATAL_ERROR** and `hcs=0x501` =
+  power-mode-status **5 = PWR_FATAL_ERROR**. So the UniPro link is not
+  healthy; the shim never issued a UIC command, while Linux always runs
+  `DME_LINK_STARTUP` on init (`ufshcd_link_startup`). That is the current
+  hypothesis.
+- **New `shim/ufs.c` probe (2026-11-12):** reverted `RESP_UPIU` to 512/128,
+  fixed the SCSI-status byte to `resp[7]` (UPIU header byte 7 = status, byte
+  6 = response), dropped the duplicate `pmsg_*` calls (`con_str`/`con_hex2`
+  already mirror every line), added the UIC path: `uic_cmd()` writes
+  ARG1..3 + opcode and waits `IS_UIC_COMPL` (bit 10), then
+  `DME_LINK_STARTUP` (0x16) before the first TUR, plus a `DME_HIBER_EXIT`
+  (0x18) retry if the link is still dead. Dumps UIC error regs
+  (`UECPA/UECDL/UECN/UECT/UECDME`), `UFS LINKUP`/`UFS H8EXIT` (op/rc/cmd/
+  arg2/arg3) and `UFS DIAG r0/r2/r6/r7`. Builds clean (`-Wall -Wextra`, 0
+  ABS64); image `shim-ufs2/shim-boot.img` `ecbe9730…` (20,480 B, v4
+  `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock `vendor_boot_a`
+  supplies the DTB). **Test in flight** on slot `a`.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
