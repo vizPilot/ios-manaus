@@ -230,18 +230,51 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   healthy; the shim never issued a UIC command, while Linux always runs
   `DME_LINK_STARTUP` on init (`ufshcd_link_startup`). That is the current
   hypothesis.
-- **New `shim/ufs.c` probe (2026-11-12):** reverted `RESP_UPIU` to 512/128,
-  fixed the SCSI-status byte to `resp[7]` (UPIU header byte 7 = status, byte
-  6 = response), dropped the duplicate `pmsg_*` calls (`con_str`/`con_hex2`
-  already mirror every line), added the UIC path: `uic_cmd()` writes
-  ARG1..3 + opcode and waits `IS_UIC_COMPL` (bit 10), then
-  `DME_LINK_STARTUP` (0x16) before the first TUR, plus a `DME_HIBER_EXIT`
-  (0x18) retry if the link is still dead. Dumps UIC error regs
-  (`UECPA/UECDL/UECN/UECT/UECDME`), `UFS LINKUP`/`UFS H8EXIT` (op/rc/cmd/
-  arg2/arg3) and `UFS DIAG r0/r2/r6/r7`. Builds clean (`-Wall -Wextra`, 0
-  ABS64); image `shim-ufs2/shim-boot.img` `ecbe9730…` (20,480 B, v4
-  `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock `vendor_boot_a`
-  supplies the DTB). **Test in flight** on slot `a`.
+- **`shim-ufs2` result (2026-11-12, read from pmsg after the `a`→`b`
+  fallback).** Start: `is=0`, `hce=1`, `hcs=0x10f`, `rsr=1`, `nutrs=0x20`,
+  `utrlba=0x512cdc00` (ABL's list), `UEC pa=0x80000010` (bit 31 error |
+  PHY-adapter generic `0x10`). Bare `DME_LINK_STARTUP` (`op=0x16`)
+  `rc=0 cmd=0x16 arg2=0x01` = UIC_CMD_RESULT_FAILURE, and it cleared
+  `uecpa` to 0. Our list was accepted (`ours=0x40016400 rsr=1`). First
+  `TUR rc=2 ocs/st=0x0500` (OCS=5), `DME_HIBER_EXIT` (`op=0x18`)
+  `rc=0 arg2=0x01` → `hcs=0x50f` (PWR_FATAL_ERROR), `uecpa=0x80000010`,
+  `uecdl=0x8000a002` (bit 31 | NAC_RECEIVED 0x2 | 0x2000 | 0x8000). TUR2 /
+  CAP / READ all `ocs/st=0x0500`; DIAG `is=0x801`, `hcs=0x501`, `rsr=0`,
+  `ocs=0x0f`, `r0..r7=0` (empty response). So the UIC path itself works
+  (DME commands complete and return), but a bare link startup on ABL's
+  leftover state fails and the device never answers a UPIU.
+- **Root cause found in Linux: the shim never reset the UniPro/MTK host.**
+  Linux/MTK always runs `ufs_mtk_host_reset()` (via
+  `ufs_mtk_hce_enable_notify(PRE_CHANGE)`), turns on CLK_CG
+  (`REG_UFS_XOUFS_CTRL |= 0x80`), then `DME_RESET`/`DME_ENABLE` and
+  `ufs_mtk_pre_link` DME writes before `DME_LINK_STARTUP`. **Important
+  correction:** on manaus the UFS reset controls are *real* register
+  writes, not no-ops — the `ti,reset-bits` flags are
+  `ASSERT_SET|DEASSERT_SET|STATUS_NONE` (0x1c), i.e. `ufs_mtk_host_reset`
+  writes `BIT(bit)` to offset `0x44` to assert and `0x48` to deassert, in
+  `syscon@112b8000` (unipro_rst) and `syscon@112bc000` (crypto_rst, hci_rst).
+  There is no `mphy_rst`, so no SMC MPHY restore is involved.
+- **New `shim/ufs.c` probe v2 (2026-11-12), image `shim-ufs3`.** Replicates
+  the Linux/MTK probe path: `timer_hz()`/`delay_us()` off `cntfrq_el0`;
+  `refclk_on()` (REFCLK_REQUEST/ACK, `0x144`); `mtk_hba_enable()` =
+  HCE stop → `mtk_host_reset()` → `XOUFS_CTRL |= 0x80` → HCE start (600 us
+  wait); `DME_RESET` (0x14) + `DME_ENABLE` (0x12); `pre_link()` = DME_SET
+  `VS_UNIPROPOWERDOWNCONTROL` (0xD0A8) 0, `PA_LOCAL_TX_LCC_ENABLE` (0x155E)
+  0, DME_GET `VS_SAVEPOWERCONTROL` (0xD0A6) clear bit 6; then
+  `DME_LINK_STARTUP` with 3 attempts (re-running `mtk_hba_enable` between
+  them, like `ufshcd_link_startup`). Logs `UFS MTK` (`ipver`, `xoufs`,
+  `refclk`, `opt0`, `mphyctrl`), `UFS RST` (syscon `0x44`/`0x48`),
+  `UFS DMERST`/`DMEEN`/`LINKUP`/`REHCE`/`LINK`/`GEAR`/`PWR` and a
+  `DME_HIBER_EXIT` fallback; only then TUR/CAP/READ/GPT. Builds clean
+  (`-Wall -Wextra`, 0 ABS64); image `shim-ufs3/shim-boot.img` `0de64842…`
+  (20,480 B, v4 `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock
+  `vendor_boot_a` supplies the DTB). **Test pending** on slot `a`.
+- **Next if `shim-ufs3` still fails:** escalate to the MPHY. Mainline's
+  `mediatek,mt8183-ufsphy` node is absent from the manaus DT (only USB phys
+  exist), so the vendor kernel drives the MPHY through the controller/firmware;
+  the remaining candidates are `REG_UFS_MPHYCTRL` (0x2200), a firmware SMC
+  (`ufs_mtk_mphy_ctrl`), or the MTK `ufs_mtk_host_reset` reset lines if my
+  offset/bit reading is wrong.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on

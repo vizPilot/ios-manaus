@@ -8,6 +8,14 @@
  * LUN 0/1 are the preloader boot LUNs). Nothing is ever written to the device:
  * there is no SCSI WRITE in this file.
  *
+ * v2 (2026-11-12): ABL leaves the controller enabled but the UniPro link
+ * half-broken (PWR_LOCAL, UECPA pending), so a bare DME_LINK_STARTUP on that
+ * leftover state returns FAILURE and every UPIU times out with OCS=5. First
+ * replicate the Linux/MTK probe path: reference clock request, MTK host reset
+ * through the syscon reset lines, HCE stop/start, DME_RESET + DME_ENABLE,
+ * ufs_mtk_pre_link DME writes, then DME_LINK_STARTUP with the retry loop.
+ * Only then touch the transfer request list.
+ *
  * Register layout and descriptor formats: JEDEC UFSHCI (JESD223).
  */
 #include <stdint.h>
@@ -34,6 +42,7 @@
 #define REG_CAP		0x00
 #define REG_VER		0x08
 #define REG_IS		0x20
+#define REG_IE		0x24
 #define REG_HCS		0x30
 #define REG_HCE		0x34
 #define REG_UTRLBA	0x50
@@ -64,8 +73,47 @@
 #define IS_DEV_FATAL	(1u << 11)
 
 /* UIC DME commands (JESD223 uic_cmd_dme). */
+#define UIC_DME_GET		0x01
+#define UIC_DME_SET		0x02
+#define UIC_DME_ENABLE		0x12
+#define UIC_DME_RESET		0x14
 #define UIC_DME_LINK_STARTUP	0x16
 #define UIC_DME_HIBER_EXIT	0x18
+
+/* UniPro attribute IDs (include/ufs/unipro.h); ARG1 = (attr & 0xffff) << 16. */
+#define ATTR_PA_LOCAL_TX_LCC_ENABLE	0x155E
+#define ATTR_PA_ACTIVETXDATALANES	0x1560
+#define ATTR_PA_TXGEAR			0x1568
+#define ATTR_PA_PWRMODE			0x1571
+#define ATTR_PA_ACTIVERXDATALANES	0x1580
+#define ATTR_PA_RXGEAR			0x1583
+#define ATTR_PA_LOCALVERINFO		0x15A9
+#define ATTR_VS_DEBUGCLOCKENABLE	0xD0A1
+#define ATTR_VS_SAVEPOWERCONTROL	0xD0A6
+#define ATTR_VS_UNIPROPOWERDOWNCONTROL	0xD0A8
+
+/* MediaTek UFS wrapper registers (drivers/ufs/host/ufs-mediatek.h). */
+#define REG_MTK_XOUFS_CTRL	0x140
+#define REG_MTK_REFCLK_CTRL	0x144
+#define REG_MTK_MMIO_OPT_CTRL_0	0x160
+#define REG_MTK_MPHYCTRL	0x2200
+#define REG_MTK_IP_VER		0x2240
+
+#define REFCLK_REQUEST		0x1
+#define REFCLK_ACK		0x2
+
+/*
+ * syscon reset controllers (manaus live FDT): unipro_rst lives in
+ * ufs_ao_config, crypto_rst/hci_rst in ufs_pdn_cfg. Each line is
+ * ti,reset-bits <assert_off assert_bit deassert_off deassert_bit status_off
+ * status_bit flags> with flags = ASSERT_SET|DEASSERT_SET|STATUS_NONE (0x1c),
+ * so a reset is done by writing BIT(bit) to the assert offset and BIT(bit)
+ * to the deassert offset. These are what ufs_mtk_host_reset() toggles.
+ */
+#define SYSCON_AO	0x112b8000UL	/* ufs_ao_config: unipro_rst (bit 1) */
+#define SYSCON_PDN	0x112bc000UL	/* ufs_pdn_cfg: crypto_rst (bit 0), hci_rst (bit 1) */
+#define RST_ASSERT	0x44
+#define RST_DEASSERT	0x48
 
 #define BLOCK		4096u
 
@@ -167,6 +215,144 @@ static uint64_t ticks(void)
 	uint64_t t;
 	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
 	return t;
+}
+
+static uint32_t timer_hz(void)
+{
+	uint64_t f;
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+	return (uint32_t)f;
+}
+
+/* Busy-wait; cntvct_el0 counts at cntfrq_el0 Hz. */
+static void delay_us(uint32_t us)
+{
+	uint64_t n = (uint64_t)timer_hz() * us / 1000000u;
+	uint64_t s = ticks();
+	while (ticks() - s < n)
+		;
+}
+
+static inline uint32_t sc_rd(uintptr_t base, uint32_t off)
+{
+	return *(volatile uint32_t *)(base + off);
+}
+
+static inline void sc_set(uintptr_t base, uint32_t off, uint32_t mask)
+{
+	*(volatile uint32_t *)(base + off) = sc_rd(base, off) | mask;
+}
+
+/* One DME_SET / DME_GET (ARG1 = attr<<16; DME_SET value in ARG3). */
+static uint32_t dme_set(uint32_t attr, uint32_t val, uint32_t *a2)
+{
+	uint32_t cmd, a3;
+	return uic_cmd(UIC_DME_SET, (attr & 0xffff) << 16, 0, val, &cmd, a2, &a3);
+}
+
+static uint32_t dme_get(uint32_t attr, uint32_t *val, uint32_t *a2)
+{
+	uint32_t cmd, a3;
+	uint32_t rc = uic_cmd(UIC_DME_GET, (attr & 0xffff) << 16, 0, 0, &cmd, a2, &a3);
+	*val = a3;
+	return rc;
+}
+
+/*
+ * ufs_mtk_host_reset(): assert hci/crypto/unipro (mphy has no reset on
+ * manaus), wait 110 us, deassert unipro/crypto/hci. The reset_control
+ * calls in Linux are real register writes here (flags ASSERT_SET |
+ * DEASSERT_SET), not the no-ops the "NONE" flags would imply.
+ */
+static void mtk_host_reset(void)
+{
+	sc_set(SYSCON_PDN, RST_ASSERT, 1u << 1);	/* hci_rst assert */
+	sc_set(SYSCON_PDN, RST_ASSERT, 1u << 0);	/* crypto_rst assert */
+	sc_set(SYSCON_AO, RST_ASSERT, 1u << 1);		/* unipro_rst assert */
+	delay_us(110);
+	sc_set(SYSCON_AO, RST_DEASSERT, 1u << 1);	/* unipro_rst deassert */
+	sc_set(SYSCON_PDN, RST_DEASSERT, 1u << 0);	/* crypto_rst deassert */
+	sc_set(SYSCON_PDN, RST_DEASSERT, 1u << 1);	/* hci_rst deassert */
+}
+
+/* HCE stop: clear CONTROLLER_ENABLE and wait for the controller to stop. */
+static uint32_t hce_stop(void)
+{
+	if (!(ufs_rd(REG_HCE) & 1))
+		return 0;
+	ufs_wr(REG_HCE, 0);
+	for (int i = 0; i < 100; i++) {
+		if (!(ufs_rd(REG_HCE) & 1))
+			return 0;
+		delay_us(10);
+	}
+	return 1;
+}
+
+/* HCE start: set CONTROLLER_ENABLE, wait (>= 600 us) for it to self-set. */
+static uint32_t hce_start(void)
+{
+	ufs_wr(REG_HCE, 1);
+	delay_us(600);
+	for (int i = 0; i < 100; i++) {
+		if (ufs_rd(REG_HCE) & 1)
+			return 0;
+		delay_us(10);
+	}
+	return 1;
+}
+
+/*
+ * ufs_mtk_hce_enable_notify(PRE_CHANGE) + HCE start: host reset, turn on
+ * CLK_CG (XOUFS_CTRL |= 0x80) to bypass the abnormal ERR_CHK hang, then
+ * re-enable the controller. Mirrors ufshcd_hba_enable() on MTK.
+ */
+static uint32_t mtk_hba_enable(void)
+{
+	hce_stop();
+	mtk_host_reset();
+	ufs_wr(REG_MTK_XOUFS_CTRL, ufs_rd(REG_MTK_XOUFS_CTRL) | 0x80);
+	return hce_start();
+}
+
+/* ufs_mtk_setup_ref_clk(true): request the reference clock, wait for ACK. */
+static uint32_t refclk_on(void)
+{
+	if (!(ufs_rd(REG_MTK_REFCLK_CTRL) & REFCLK_REQUEST))
+		ufs_wr(REG_MTK_REFCLK_CTRL, REFCLK_REQUEST);
+	for (int i = 0; i < 300; i++) {			/* <= 3 ms */
+		uint32_t v = ufs_rd(REG_MTK_REFCLK_CTRL);
+		if (((v & REFCLK_ACK) >> 1) == (v & REFCLK_REQUEST))
+			return 0;
+		delay_us(10);
+	}
+	return 1;
+}
+
+/* ufs_mtk_pre_link: non-LPM, disable host TX LCC, clear deep stall. */
+static void pre_link(void)
+{
+	uint32_t a2 = 0, v = 0;
+	dme_set(ATTR_VS_UNIPROPOWERDOWNCONTROL, 0, &a2);
+	dme_set(ATTR_PA_LOCAL_TX_LCC_ENABLE, 0, &a2);
+	if (!dme_get(ATTR_VS_SAVEPOWERCONTROL, &v, &a2)) {
+		v &= ~(1u << 6);
+		dme_set(ATTR_VS_SAVEPOWERCONTROL, v, &a2);
+	}
+}
+
+/* ufs_mtk_cfg_unipro_cg(true): enable UniPro clock gating after link up. */
+static void post_link(void)
+{
+	uint32_t a2 = 0, v = 0;
+	if (!dme_get(ATTR_VS_SAVEPOWERCONTROL, &v, &a2)) {
+		v |= (1u << 0) | (1u << 2) | (1u << 3);
+		dme_set(ATTR_VS_SAVEPOWERCONTROL, v, &a2);
+	}
+	if (!dme_get(ATTR_VS_DEBUGCLOCKENABLE, &v, &a2)) {
+		v &= ~(1u << 5);
+		dme_set(ATTR_VS_DEBUGCLOCKENABLE, v, &a2);
+	}
 }
 
 static void zero(void *p, unsigned n)
@@ -326,36 +512,84 @@ static void ufs_diag_dump(uint32_t rc)
 
 void test_ufs(void)
 {
-	ufs_log1("UFS", "milestone 5 probe (read-only)");
+	ufs_log1("UFS", "milestone 5 probe v2: MTK host reset + link startup (read-only)");
 	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
-	uint32_t cap = ufs_rd(REG_CAP), hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
+	ufs_log2("UFS TIMER", "cntfrq=", timer_hz(), "hz", 0);
+
+	uint32_t cap = ufs_rd(REG_CAP);
 	ufs_log2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
-	ufs_log2("UFS", "hce=", hce, "hcs=", hcs);
-	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
+	ufs_log2("UFS", "hce=", ufs_rd(REG_HCE), "hcs=", ufs_rd(REG_HCS));
+	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "ie=", ufs_rd(REG_IE));
 	ufs_log2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
 	ufs_log2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
 	ufs_log2("UFS UEC", "pa=", ufs_rd(REG_UECPA), "dl=", ufs_rd(REG_UECDL));
 	ufs_log2("UFS UEC", "net=", ufs_rd(REG_UECN), "tr=", ufs_rd(REG_UECT));
 	ufs_log2("UFS UEC", "dme=", ufs_rd(REG_UECDME), "is=", ufs_rd(REG_IS));
-
-	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
-		ufs_log1("UFS", "host not enabled/ready: stop");
-		return;
-	}
-	if (ufs_rd(REG_UTRLDBR)) {
-		ufs_log1("UFS", "requests outstanding: stop");
-		return;
-	}
+	ufs_log2("UFS MTK", "ipver=", ufs_rd(REG_MTK_IP_VER), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
+	ufs_log2("UFS MTK", "refclk=", ufs_rd(REG_MTK_REFCLK_CTRL), "opt0=", ufs_rd(REG_MTK_MMIO_OPT_CTRL_0));
+	ufs_log2("UFS MTK", "mphyctrl=", ufs_rd(REG_MTK_MPHYCTRL), "hcs=", ufs_rd(REG_HCS));
+	ufs_log2("UFS RST", "ao44=", sc_rd(SYSCON_AO, RST_ASSERT), "ao48=", sc_rd(SYSCON_AO, RST_DEASSERT));
+	ufs_log2("UFS RST", "pdn44=", sc_rd(SYSCON_PDN, RST_ASSERT), "pdn48=", sc_rd(SYSCON_PDN, RST_DEASSERT));
 
 	/*
-	 * Linux always starts the UniPro link on init (ufshcd_link_startup ->
-	 * DME_LINK_STARTUP); ABL's leftover state can leave the device off the
-	 * link even while HCS says the controller is ready. That is the prime
-	 * suspect for OCS=5 (PEER_COMM_FAILURE) on the first command.
+	 * ABL leaves the controller enabled but the UniPro link half-broken
+	 * (PWR_LOCAL, UECPA pending). Replicate the Linux/MTK probe sequence:
+	 * reference clock on, host reset + HCE, DME reset/enable, pre_link,
+	 * then DME_LINK_STARTUP with the retry loop.
 	 */
+	uint32_t rc = refclk_on();
+	ufs_log2("UFS REFCLK", "rc=", rc, "reg=", ufs_rd(REG_MTK_REFCLK_CTRL));
+
+	rc = mtk_hba_enable();
+	ufs_log2("UFS HCE", "rc=", rc, "hce=", ufs_rd(REG_HCE));
+	ufs_log2("UFS HCE", "hcs=", ufs_rd(REG_HCS), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
+	ufs_wr(REG_IS, ufs_rd(REG_IS));		/* RW1C: drop stale UIC errors */
+
+	if (!(ufs_rd(REG_HCE) & 1)) {
+		ufs_log1("UFS", "HCE did not set: stop");
+		return;
+	}
+
 	uint32_t ucmd = 0, ua2 = 0, ua3 = 0, urc;
-	urc = uic_cmd(UIC_DME_LINK_STARTUP, 0, 0, 0, &ucmd, &ua2, &ua3);
-	uic_log("UFS LINKUP", UIC_DME_LINK_STARTUP, urc, ucmd, ua2, ua3);
+	urc = uic_cmd(UIC_DME_RESET, 0, 0, 0, &ucmd, &ua2, &ua3);
+	uic_log("UFS DMERST", UIC_DME_RESET, urc, ucmd, ua2, ua3);
+	urc = uic_cmd(UIC_DME_ENABLE, 0, 0, 0, &ucmd, &ua2, &ua3);
+	uic_log("UFS DMEEN", UIC_DME_ENABLE, urc, ucmd, ua2, ua3);
+
+	uint32_t link = 0;
+	for (int attempt = 0; attempt < 3 && !link; attempt++) {
+		pre_link();
+		urc = uic_cmd(UIC_DME_LINK_STARTUP, 0, 0, 0, &ucmd, &ua2, &ua3);
+		uic_log("UFS LINKUP", UIC_DME_LINK_STARTUP, urc, ucmd, ua2, ua3);
+		link = !urc && (ua2 & 0xff) == 0;
+		if (!link && attempt < 2) {
+			rc = mtk_hba_enable();
+			ufs_log2("UFS REHCE", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
+			ufs_wr(REG_IS, ufs_rd(REG_IS));
+		}
+	}
+	ufs_log2("UFS LINK", "up=", link, "dev=", (ufs_rd(REG_HCS) & HCS_DP) ? 1u : 0u);
+
+	uint32_t v = 0;
+	if (!dme_get(ATTR_PA_TXGEAR, &v, &ua2)) {
+		uint32_t rx = 0;
+		dme_get(ATTR_PA_RXGEAR, &rx, &ua2);
+		ufs_log2("UFS GEAR", "tx=", v, "rx=", rx);
+	}
+	if (!dme_get(ATTR_PA_PWRMODE, &v, &ua2)) {
+		uint32_t lanes = 0;
+		dme_get(ATTR_PA_ACTIVETXDATALANES, &lanes, &ua2);
+		ufs_log2("UFS PWR", "mode=", v, "lanes=", lanes);
+	}
+	post_link();
+
+	/* If the link is still down, try waking it out of Hibern8 once. */
+	if (!link) {
+		urc = uic_cmd(UIC_DME_HIBER_EXIT, 0, 0, 0, &ucmd, &ua2, &ua3);
+		uic_log("UFS H8EXIT", UIC_DME_HIBER_EXIT, urc, ucmd, ua2, ua3);
+		link = !urc && (ua2 & 0xff) == 0;
+		ufs_log2("UFS LINK2", "up=", link, "hcs=", ufs_rd(REG_HCS));
+	}
 
 	/* Take over the transfer request list: stop, point at ours, run. */
 	ufs_wr(REG_UTRLRSR, 0);
@@ -374,7 +608,7 @@ void test_ufs(void)
 		return;
 	}
 
-	uint32_t ocs = 0, st = 0, rc;
+	uint32_t ocs = 0, st = 0;
 	static const uint8_t tur[6] = { 0x00 };
 	/* A first command may report a unit attention; retry a few times. */
 	for (int i = 0; i < 3; i++) {
@@ -382,13 +616,6 @@ void test_ufs(void)
 		ufs_log2("UFS TUR", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 		if (!rc)
 			break;
-	}
-	/* Still failing: try waking the link out of Hibern8 and retry once. */
-	if (rc) {
-		urc = uic_cmd(UIC_DME_HIBER_EXIT, 0, 0, 0, &ucmd, &ua2, &ua3);
-		uic_log("UFS H8EXIT", UIC_DME_HIBER_EXIT, urc, ucmd, ua2, ua3);
-		rc = scsi(UFS_LUN, tur, sizeof(tur), 0, 0, &ocs, &st);
-		ufs_log2("UFS TUR2", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
 	}
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
