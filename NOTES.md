@@ -202,12 +202,19 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 - **Restore verified after milestone B:** `boot_a` `bbc67027…` and
   `vendor_boot_a` `5d28026c…` are byte-identical to the backups (on-device
   `sha256sum`), `set_active b`, Android boots `_b`.
-- **Next:** boot `shim-xnu-miled` on slot `a` (payload with `--ramdisk
-  sweet-init`, `rd=md0`): expect `Added memory device md0`, `BSD root: md0`,
-  `load_init_program: attempting to load /sbin/launchd`,
-  `*** SWEET userspace: init running as PID 1 ***` and the heartbeat. If it
-  panics instead, photograph the screen and check the last lines against the
-  mockfs/AMFI history in the sweet section of this file.
+- **MILESTONE D (2026-11-12 ~22:0x): iOS USERSPACE PID 1 RUNS ON MANAUS.**
+  Booted `shim-xnu-miled` on slot `a` (payload with `--ramdisk sweet-init`,
+  `rd=md0`): XNU mounted `md0` (mockfs), executed `/sbin/launchd` and the
+  screen shows `SWEET init: still alive` repeating every 5 s, no panic
+  (user, 2026-11-12). This is the same stage sweet reached on 2026-10-15,
+  now on MT6879. Because init never exits, XNU never resets, so there is no
+  automatic `a`→`b` fallback from this state: returning to Android needs a
+  manual Power+VolDown and a restore of `boot_a`/`vendor_boot_a`.
+- **Next after this point (ideas, not done):** capture the full boot text
+  (`BSD root: md0`, `load_init_program`, PID 1 lines) with a photo + OCR;
+  give XNU its own ramoops console so panics survive without photos; then
+  follow the sweet roadmap on manaus (fbcon/display, USB Ethernet, root
+  image).
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
