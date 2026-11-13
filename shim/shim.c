@@ -471,8 +471,13 @@ void shim_main(uint64_t dtb)
 		for (uint32_t y = 0; y < FB_H; y++)
 			for (uint32_t x = 0; x < FB_STRIDE / 4; x++)
 				fb[y * (FB_STRIDE / 4) + x] = GREEN;
-		for (volatile uint32_t i = 0; i < 20000000; i++)
-			;	/* ~0.5 s so the flash is visible even if we hang next */
+		/*
+		 * 1.5 s, not a spin loop: 20M volatile increments is only a few
+		 * tens of ms on an A76, which is why the 2026-11-12 test showed no
+		 * visible flash. cntfrq_el0 is set by LK; if it is 0 this returns
+		 * immediately, so it is safe this early.
+		 */
+		delay_ms(1500);
 	}
 
 	/* Reset the SoC if any later step hangs; PSCI below is the fast path. */
