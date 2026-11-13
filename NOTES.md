@@ -174,11 +174,40 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `delay_ms(1500)` (`cntpct_el0`; no-op if LK left `cntfrq_el0` at 0). The
   milestone-B image above was built *before* this fix, which is why no flash
   was seen even though the shim ran.
+- **MILESTONE C: XNU EXECUTES ON MANAUS (2026-11-12 ~21:50).** Same slot-`a`
+  protocol, `SHIM_MILESTONE_B=0` (real jump), correct `vendor_boot`. On screen:
+  green flash, red shim console, then XNU's own output (photos
+  `D:\manaus\20261112_215014.jpg`, `..._215025.jpg`; read with Windows
+  `Windows.Media.Ocr`, the model cannot see images): `SWEET CPU: 1/1 CPUs
+  initialized, SGII verified`, VM zones (`PGZ`, `GEN0`..`GEN3`, `DATAF`),
+  `VM bootstrap done: 85 maps, 165 entries and 501 holes left`, log queues,
+  OSLog streams, `kdp-core`. Then panic:
+  `IOFindBSDRoot: specified root memory device, md0, has not been configured
+  (IOKitBSDInit.cpp:82)` + `handshake structure not initialized`,
+  `Hardware Model: iPhone10,3`, boot version `manaus-shim`, roots installed 0.
+- **Cause: the payload was built with `rd=md0` but WITHOUT `--ramdisk`.**
+  `tools/mkpayload.py --ramdisk IMAGE` appends the image and adds the ADT
+  `/chosen/memory-map` `RAMDisk` entry; without it IOKit finds no md0, which
+  is exactly the panic. The mockfs ramdisk is the static Mach-O `sweet-init`
+  itself (magic `cffaedfe`, cputype `0x0100000c`; 16,635 B copy in
+  `shim-xnu-ramdisk/sweet-init`). Corrected images:
+  `shim-xnu-miled/shim-boot.img` `448b6ad2…` and
+  `shim-vendor_boot.img` `9b6545a1…` (`ramdisk_size 16610848`,
+  `dtb_size 249100`), payload `bb4f518b…`.
+- **A panic does NOT auto-reset with `debug=0xc`:** KDB is enabled and there
+  is no serial, so the phone stays on the panic screen (the shim disarmed the
+  WDT before jumping). Future tests: either keep `debug=0xc` and expect a
+  manual Power+VolDown, or drop to `debug=0x8` (KPRT only) so the panic path
+  can reset and the slot fallback returns Android automatically.
 - **Restore verified after milestone B:** `boot_a` `bbc67027…` and
   `vendor_boot_a` `5d28026c…` are byte-identical to the backups (on-device
   `sha256sum`), `set_active b`, Android boots `_b`.
-- **Next:** the real jump test on slot `a` (milestone B off, same correct
-  `vendor_boot`, green flash now visible) — XNU itself owns the WDT reset
+- **Next:** boot `shim-xnu-miled` on slot `a` (payload with `--ramdisk
+  sweet-init`, `rd=md0`): expect `Added memory device md0`, `BSD root: md0`,
+  `load_init_program: attempting to load /sbin/launchd`,
+  `*** SWEET userspace: init running as PID 1 ***` and the heartbeat. If it
+  panics instead, photograph the screen and check the last lines against the
+  mockfs/AMFI history in the sweet section of this file.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
