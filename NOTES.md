@@ -406,6 +406,30 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `UFS RDFDI … val=0` and TUR/CAP/READ then return `rc=0`, the missing handshake
   was the fix; if they still CHECK CONDITION, `UFS SENSE key=/asc=/ascq=` names
   the reason.
+- **🎉🎉 `shim-ufs6` result (2026-11-13, pmsg after the `a`→`b` fallback at
+  ~120 s): THE DEVICE HANDSHAKE WAS THE MISSING STEP — UFS IS FULLY READABLE.**
+  `UFS NOPOUT rc=0 ocs/st=0x0000`, `rsp=0x20` (NOP IN) → the device answers the
+  NOP OUT. `UFS SETFDI rc=0`, `rsp=0x36` (QUERY RSP), `val=0x1` → fDeviceInit
+  was set. `UFS RDFDI rc=0`, `rsp=0x36`, `val=0x0` → the device cleared it
+  immediately; `UFS DEVTINIT rc=0`. Then:
+  - **First TUR: CHECK CONDITION** — `UFS SENSE rsp=0x21 code=0x01 key=0x06
+    asc=0x29 ascq=0x00` = **UNIT ATTENTION / POWER ON, RESET OR BUS DEVICE RESET
+    OCCURRED**, the expected one-shot UA after our RST_n toggle. The **second TUR
+    succeeds** (`rc=0 ocs/st=0`).
+  - **READ CAPACITY(10): `rc=0`** → `lastlba=0x03b95fff`, `blk=0x1000`
+    (4 KiB logical blocks) → LUN 2 = 0x3b96000 blocks ≈ 237.9 GiB.
+  - **READ(10) LBA 0: `rc=0`** → `MBR sig=0xaa55 type=0xee` (protective MBR),
+    `UFS GPT=EFI PART`, `entries=0x80 lba=0x02`. **The full GPT is dumped:**
+    expdb, nvram, nvdata, md1img_a, mvpu_algo_a, **boot_a**, **vendor_boot_a**,
+    md1img_b, mvpu_algo_b, **boot_b**, **vendor_boot_b**, super, **userdata**
+    (`lba=0x22c800 MiB=0x39687` ≈ 229.6 GiB). `userdata fs=other` (the iOS root
+    is HFS+, not f2fs/ext4, so `fs_type()` reports "other" — expected).
+  **So milestone 5 is DONE:** the link is up, the UTP path works, and the shim
+  reads the internal UFS GPT and partitions. The CHECK CONDITION in shim-ufs5
+  was the persistent not-ready state from the missing fDeviceInit, not a
+  transport fault (the one-shot UNIT ATTENTION here is normal after RST_n).
+  Next: read the iOS root out of `userdata` (HFS+) and hand it to XNU, replacing
+  the ramdisk root.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
