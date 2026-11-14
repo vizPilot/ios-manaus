@@ -37,6 +37,23 @@
  * ti,reset-bits flags 0x1c = ASSERT_SET|DEASSERT_SET|STATUS_NONE, so asserting
  * sets the bit at 0x44 and deasserting sets the bit at 0x48.
  *
+ * v5 (2026-11-13): with the device reset in place the link came up on the first
+ * attempt (VS_LINK_UP, HCS.DP set) and the UTP path works, but every SCSI
+ * command returned CHECK CONDITION. The shim jumps straight from link startup
+ * to SCSI; Linux ufshcd_probe_hba() first sends a NOP OUT (verify_dev_init)
+ * and then sets and polls the fDeviceInit flag with QUERY REQUESTS
+ * (complete_dev_init), which is what makes the logical units usable. v5 adds
+ * device_init() for that handshake and dumps the response UPIU header and the
+ * 18-byte SCSI sense data on a CHECK CONDITION so the sense key/ASC/ASCQ is
+ * visible. The UTRD command type stays UTP_CMD_TYPE_UFS_STORAGE (1): that is
+ * what Linux uses for UFSHCI 2.0 for BOTH SCSI and device-management commands
+ * (ufshcd_comp_scsi_upiu/ufshcd_compose_devman_upiu branch on
+ * ufs_version <= ufshci_version(1, 1) = 0x110, and the shim reads ver=0x200),
+ * so the earlier "set the SCSI command type to 0" idea was wrong. SCSI commands
+ * now drop the interrupt bit to match ufshcd_prepare_req_desc_hdr(), which
+ * sets it only for device-management commands. Still read-only (no SCSI
+ * WRITE).
+ *
  * Register layout and descriptor formats: JEDEC UFSHCI (JESD223).
  */
 #include <stdint.h>
@@ -59,6 +76,51 @@
 #define RESP_UPIU_BYTES	512u
 #define RESP_UPIU_DW	(RESP_UPIU_BYTES / 4u)
 #define STATUS_BYTE	7u			/* SCSI status in the response UPIU header */
+#define RESP_CODE_BYTE	6u			/* UPIU response code in the response header */
+
+/*
+ * UPIU transaction types (ufs.h). A SCSI command is answered by a RESPONSE
+ * UPIU, a NOP OUT by a NOP IN and a QUERY REQUEST by a QUERY RESPONSE.
+ */
+#define UPIU_TRANSACTION_NOP_OUT	0x00
+#define UPIU_TRANSACTION_COMMAND	0x01
+#define UPIU_TRANSACTION_QUERY_REQ	0x16
+#define UPIU_TRANSACTION_NOP_IN		0x20
+#define UPIU_TRANSACTION_RESPONSE	0x21
+#define UPIU_TRANSACTION_QUERY_RSP	0x36
+#define UPIU_TRANSACTION_REJECT	0x3f
+
+/* Command UPIU flags (ufs.h). */
+#define UPIU_CMD_FLAGS_NONE	0x00
+#define UPIU_CMD_FLAGS_READ	0x40
+
+/*
+ * UTRD DW0 (ufshci.h). UFSHCI 2.0 (the shim reads ver=0x200) uses
+ * UTP_CMD_TYPE_UFS_STORAGE (1) for BOTH SCSI and device-management commands;
+ * only UFSHCI <= 1.1 uses UTP_CMD_TYPE_SCSI (0) / UTP_CMD_TYPE_DEV_MANAGE (2).
+ * Linux sets the interrupt bit only for device-management commands
+ * (ufshcd_prepare_req_desc_hdr() sets UTP_REQ_DESC_INT_CMD when lrbp->intr_cmd).
+ */
+#define UPIU_COMMAND_TYPE_OFFSET	28
+#define UTP_CMD_TYPE_SCSI	0x0u
+#define UTP_CMD_TYPE_UFS_STORAGE	0x1u
+#define UTP_CMD_TYPE_DEV_MANAGE	0x2u
+#define UTP_NO_DATA_TRANSFER	0x00000000u
+#define UTP_HOST_TO_DEVICE	0x02000000u
+#define UTP_DEVICE_TO_HOST	0x04000000u
+#define UTP_REQ_DESC_INT_CMD	0x01000000u
+
+/* Query requests (ufs.h): opcode/idn at qr[0..1], query_func at header byte 5. */
+#define UPIU_QUERY_OPCODE_READ_FLAG	0x5
+#define UPIU_QUERY_OPCODE_SET_FLAG	0x6
+#define UPIU_QUERY_FUNC_STANDARD_READ_REQUEST	0x01
+#define UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST	0x81
+#define QUERY_FLAG_IDN_FDEVICEINIT	0x01
+#define UPIU_COMMAND_SET_TYPE_SCSI	0x0
+
+/* Response UPIU: sense_data_len (BE16) then the 18-byte fixed-format sense. */
+#define RSP_SENSE_LEN_OFF	32u
+#define RSP_SENSE_DATA_OFF	34u
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
@@ -204,6 +266,7 @@ static uint64_t smc4(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 }
 
 static uint64_t ticks(void);
+static uint32_t be32(const uint8_t *p);
 
 /* UTP transfer request descriptor (32 bytes). */
 struct utrd {
@@ -507,31 +570,32 @@ static uint32_t be32(const uint8_t *p)
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-/*
- * Issue one SCSI command (read direction or no data) in slot 0.
- * Returns 0 on success, otherwise a code describing the failure stage.
- */
-static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
-    uint32_t *ocs_out, uint32_t *status_out)
+/* Snapshot the last failed command for ufs_diag_dump(). */
+static void diag_capture(void)
 {
-	static uint8_t tag;
-	zero(&utrl[0], sizeof(utrl[0]));
-	zero(&ucd, sizeof(ucd));
+	diag.is = ufs_rd(REG_IS);
+	diag.hcs = ufs_rd(REG_HCS);
+	diag.rsr = ufs_rd(REG_UTRLRSR);
+	diag.ocs = utrl[0].dw2 & 0xff;
+	for (unsigned i = 0; i < 16; i++)
+		diag.resp[i] = ucd.resp[i];
+}
 
-	/* Command UPIU: header (12 bytes), expected length, CDB. */
-	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = len ? 0x40 : 0x00;		/* flags: R (data in) */
-	ucd.cmd[2] = lun;
-	ucd.cmd[3] = ++tag;
-	ucd.cmd[12] = len >> 24;
-	ucd.cmd[13] = len >> 16;
-	ucd.cmd[14] = len >> 8;
-	ucd.cmd[15] = len;
-	for (unsigned i = 0; i < cdb_len; i++)
-		ucd.cmd[16 + i] = cdb[i];
+/*
+ * Fill UTRD slot 0 for the command UPIU already built in ucd.cmd, and (for a
+ * data command) the single-entry PRDT for buf/len. cmd_type is the UTP command
+ * type, dir the data direction and intr the interrupt-command bit; Linux's
+ * ufshcd_prepare_req_desc_hdr() sets intr only for device-management commands.
+ * Clears the response buffer and the PRDT but leaves ucd.cmd to the caller.
+ */
+static void prep_utrd(uint32_t cmd_type, uint32_t dir, uint32_t intr, void *buf, uint32_t len)
+{
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(ucd.resp, sizeof(ucd.resp));
+	zero(&ucd.prdt[0], sizeof(ucd.prdt[0]));
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
-	utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);	/* UFS storage, dev->host */
+	utrl[0].dw0 = dir | (cmd_type << UPIU_COMMAND_TYPE_OFFSET) | (intr ? UTP_REQ_DESC_INT_CMD : 0);
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -543,6 +607,15 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 		ucd.prdt[0].dbc = len - 1;
 		utrl[0].prdt = (1024u / 4) << 16 | 1;
 	}
+}
+
+/*
+ * Ring slot 0 and wait for it to complete. Returns 1 on timeout and 2 on an
+ * OCS error (both captured for ufs_diag_dump), 0 when the host wrote OCS=0;
+ * *ocs_out and *status_out carry the OCS and SCSI status bytes.
+ */
+static uint32_t utrd_wait(uint32_t *ocs_out, uint32_t *status_out)
+{
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	/* An OCS error can halt the list (UTRLRSR -> 0): re-arm it before ringing. */
@@ -556,13 +629,10 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	uint64_t start = ticks();
 	while (ufs_rd(REG_UTRLDBR) & 1) {
 		if (ticks() - start > 19200000) {	/* 1 s */
-			diag.is = ufs_rd(REG_IS);
-			diag.hcs = ufs_rd(REG_HCS);
-			diag.rsr = ufs_rd(REG_UTRLRSR);
-			diag.ocs = utrl[0].dw2 & 0xff;
-			for (unsigned i = 0; i < 16; i++)
-				diag.resp[i] = ucd.resp[i];
+			diag_capture();
 			ufs_wr(REG_UTRLCLR, ~1u);	/* clear slot 0 (write 0 to the bit) */
+			*ocs_out = 0;
+			*status_out = 0;
 			return 1;			/* timeout */
 		}
 	}
@@ -570,18 +640,122 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	*ocs_out = utrl[0].dw2 & 0xff;
 	*status_out = ucd.resp[STATUS_BYTE];	/* SCSI status in the response UPIU */
 	if (*ocs_out) {
-		diag.is = ufs_rd(REG_IS);
-		diag.hcs = ufs_rd(REG_HCS);
-		diag.rsr = ufs_rd(REG_UTRLRSR);
-		diag.ocs = *ocs_out;
-		for (unsigned i = 0; i < 16; i++)
-			diag.resp[i] = ucd.resp[i];
-	}
-	if (*ocs_out)
+		diag_capture();
 		return 2;
-	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
+	}
+	return 0;
+}
+
+/* Dump the response UPIU header and the fixed-format sense data of a failure. */
+static void sense_dump(void)
+{
+	uint32_t slen = (uint32_t)ucd.resp[RSP_SENSE_LEN_OFF] << 8 | ucd.resp[RSP_SENSE_LEN_OFF + 1];
+	ufs_log2("UFS SENSE", "rsp=", ucd.resp[0], "code=", ucd.resp[RESP_CODE_BYTE]);
+	ufs_log2("UFS SENSE", "len=", slen, "key=", ucd.resp[RSP_SENSE_DATA_OFF + 2] & 0x0f);
+	ufs_log2("UFS SENSE", "asc=", ucd.resp[RSP_SENSE_DATA_OFF + 12], "ascq=", ucd.resp[RSP_SENSE_DATA_OFF + 13]);
+}
+
+/*
+ * Issue one SCSI command (read direction or no data) in slot 0.
+ * Returns 0 on success, otherwise a code describing the failure stage.
+ */
+static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
+    uint32_t *ocs_out, uint32_t *status_out)
+{
+	static uint8_t tag;
+	zero(ucd.cmd, sizeof(ucd.cmd));
+
+	/* Command UPIU: header (12 bytes), expected length, CDB. */
+	ucd.cmd[0] = UPIU_TRANSACTION_COMMAND;
+	ucd.cmd[1] = len ? UPIU_CMD_FLAGS_READ : UPIU_CMD_FLAGS_NONE;
+	ucd.cmd[2] = lun;
+	ucd.cmd[3] = ++tag;
+	ucd.cmd[4] = UPIU_COMMAND_SET_TYPE_SCSI;
+	ucd.cmd[12] = len >> 24;
+	ucd.cmd[13] = len >> 16;
+	ucd.cmd[14] = len >> 8;
+	ucd.cmd[15] = len;
+	for (unsigned i = 0; i < cdb_len; i++)
+		ucd.cmd[16 + i] = cdb[i];
+
+	prep_utrd(UTP_CMD_TYPE_UFS_STORAGE, len ? UTP_DEVICE_TO_HOST : UTP_NO_DATA_TRANSFER, 0, buf, len);
+	uint32_t rc = utrd_wait(ocs_out, status_out);
+	if (rc)
+		return rc;
+	if (ucd.resp[0] != UPIU_TRANSACTION_RESPONSE)
 		return 3;
-	return *status_out ? 4 : 0;
+	if (*status_out) {
+		sense_dump();
+		return 4;
+	}
+	return 0;
+}
+
+/*
+ * One device-management UPIU (NOP OUT or QUERY REQUEST) in slot 0, with the
+ * interrupt bit Linux sets for dev commands. On success *val_out gets the
+ * query response value (UPIU offset 20) and *rsp_type_out the response UPIU
+ * transaction type (NOP IN or QUERY RESPONSE). Returns the utrd_wait code.
+ */
+static uint32_t dev_upiu(uint8_t upiu_type, uint8_t query_func, uint8_t opcode, uint8_t idn,
+    uint32_t *val_out, uint32_t *rsp_type_out, uint32_t *ocs_out, uint32_t *status_out)
+{
+	static uint8_t tag;
+	*val_out = 0;
+	zero(ucd.cmd, sizeof(ucd.cmd));
+
+	ucd.cmd[0] = upiu_type;
+	ucd.cmd[3] = ++tag;
+	if (upiu_type == UPIU_TRANSACTION_QUERY_REQ) {
+		ucd.cmd[5] = query_func;	/* query_func lives in header DW1 byte 1 */
+		ucd.cmd[12] = opcode;		/* qr.opcode */
+		ucd.cmd[13] = idn;		/* qr.idn */
+		/* qr.index/selector/length/value stay 0 */
+	}
+
+	prep_utrd(UTP_CMD_TYPE_UFS_STORAGE, UTP_NO_DATA_TRANSFER, 1, 0, 0);
+	uint32_t rc = utrd_wait(ocs_out, status_out);
+	*rsp_type_out = ucd.resp[0];
+	if (!rc && *rsp_type_out == UPIU_TRANSACTION_QUERY_RSP)
+		*val_out = be32(ucd.resp + 20);	/* query response value */
+	return rc;
+}
+
+/*
+ * ufshcd_probe_hba()'s device handshake, which the shim skipped: a NOP OUT
+ * UPIU (ufshcd_verify_dev_init) proves the device answers, then the host sets
+ * the fDeviceInit flag and polls it until the device clears it
+ * (ufshcd_complete_dev_init). Only then are the logical units usable, so a
+ * SCSI command issued straight after link startup returns CHECK CONDITION.
+ * Returns 0 once fDeviceInit reads back clear.
+ */
+static uint32_t device_init(void)
+{
+	uint32_t ocs = 0, st = 0, rt = 0, val = 0, rc;
+
+	rc = dev_upiu(UPIU_TRANSACTION_NOP_OUT, 0, 0, 0, &val, &rt, &ocs, &st);
+	ufs_log2("UFS NOPOUT", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
+	ufs_log2("UFS NOPOUT", "rsp=", rt, "val=", val);
+
+	rc = dev_upiu(UPIU_TRANSACTION_QUERY_REQ, UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+	    UPIU_QUERY_OPCODE_SET_FLAG, QUERY_FLAG_IDN_FDEVICEINIT, &val, &rt, &ocs, &st);
+	ufs_log2("UFS SETFDI", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
+	ufs_log2("UFS SETFDI", "rsp=", rt, "val=", val);
+
+	/* Poll READ fDeviceInit until the device clears it (usually a few ms). */
+	for (int i = 0; i < 100; i++) {
+		val = 0;
+		rc = dev_upiu(UPIU_TRANSACTION_QUERY_REQ, UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+		    UPIU_QUERY_OPCODE_READ_FLAG, QUERY_FLAG_IDN_FDEVICEINIT, &val, &rt, &ocs, &st);
+		if (i < 2 || rc || !(val & 1)) {
+			ufs_log2("UFS RDFDI", "rc=", rc, "ocs/st=", (uint64_t)ocs << 8 | st);
+			ufs_log2("UFS RDFDI", "rsp=", rt, "val=", val);
+		}
+		if (!rc && !(val & 1))
+			return 0;
+		delay_us(2000);
+	}
+	return 1;
 }
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
@@ -652,7 +826,7 @@ static void ufs_diag_dump(uint32_t rc)
 
 void test_ufs(void)
 {
-	ufs_log1("UFS", "milestone 5 probe v4: device reset + Linux-exact link startup (read-only)");
+	ufs_log1("UFS", "milestone 5 probe v5: device reset + link + fDeviceInit handshake (read-only)");
 	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
 	ufs_log2("UFS TIMER", "cntfrq=", timer_hz(), "hz", 0);
 
@@ -764,6 +938,17 @@ void test_ufs(void)
 	    !(ufs_rd(REG_UTRLRSR) & 1)) {
 		ufs_log1("UFS", "list base not taken: stop");
 		return;
+	}
+
+	/*
+	 * Linux ufshcd_probe_hba() sends a NOP OUT and then sets/polls
+	 * fDeviceInit before it issues any SCSI command; without it the
+	 * logical units are not ready and every SCSI command is CHECK
+	 * CONDITION. Do that handshake now.
+	 */
+	if (link) {
+		rc = device_init();
+		ufs_log2("UFS DEVTINIT", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
 	}
 
 	uint32_t ocs = 0, st = 0;

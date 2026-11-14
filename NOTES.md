@@ -365,6 +365,47 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   Interpretation: if SMC `DEVICE_RESET` returns `SIP_SVC_E_NOT_SUPPORTED` (-1)
   the ATF lacks it; if attempt 1 links, the device reset was the missing step;
   otherwise compare attempts 1/2/3.
+- **🎉 `shim-ufs5` result (2026-11-13, pmsg after the `a`→`b` fallback at
+  ~114 s): THE LINK IS UP — the device reset was the missing step.**
+  `UFS DEVRST lo=0 hi=0` → the SMC `UFS_MTK_SIP_DEVICE_RESET` is supported and
+  returned `SIP_SVC_E_SUCCESS`. **Attempt 1 (Linux-exact, no DME_RESET/ENABLE)
+  linked on the first try:** `UFS L1 hce=0 hcs=0x08`, `xoufs=0x82 probe=1`,
+  `op=0x16 rc=0 arg2=0x00` (**UIC_CMD_RESULT_SUCCESS**, was `0x01`), `hcs=0x0f`
+  (**DP set**), `probe=2` (**VS_LINK_UP**), `dp=1`, `UFS LINK up=1 dev=1`.
+  `GEAR tx=1 rx=1`, `PWR mode=0x55 lanes=1`. Attempts 2/3 never ran. So
+  `mtk_device_reset()` (RST_n low 12 µs / high 12 ms via `0xC2000276` cmd `0x2`)
+  is the fix; host reset + HCE + pre_link alone were not enough.
+  **The UTP path now works too:** TUR/CAP/READ all return a valid RESPONSE UPIU
+  with **OCS=0** (`ocs/st=0x0002` = SCSI **status 2 = CHECK CONDITION**), where
+  v2–v4 got OCS timeouts (`0x0f`/`0x05`). No OCS error, so `UFS DIAG` prints
+  all-zero (the `diag` struct is only filled on an OCS error; the "ocs error"
+  label is misleading here). **Next:** read the sense data (response UPIU bytes
+  16+) to get the sense key/ASC/ASCQ, and run the Linux device-init handshake
+  the shim skips — `ufshcd_probe_hba` does a QUERY REQUEST (set/poll
+  `fDeviceInit`) *before* any SCSI command.
+- **`shim/ufs.c` v5 (image `shim-ufs6`), 2026-11-13.** The shim jumps straight
+  from link startup to SCSI, but Linux `ufshcd_probe_hba()` first sends a NOP OUT
+  (`ufshcd_verify_dev_init`) and then sets and polls the `fDeviceInit` flag with
+  QUERY REQUESTS (`ufshcd_complete_dev_init`); only then are the logical units
+  usable. v5 adds `device_init()` for that handshake, refactors `scsi()` into
+  `prep_utrd()`/`utrd_wait()`/`scsi()`, adds `dev_upiu()` (NOP OUT / QUERY
+  REQUEST, interrupt bit set like Linux dev commands) and `sense_dump()` (dumps
+  the response UPIU header + the 18-byte fixed-format sense: key/ASC/ASCQ) on a
+  CHECK CONDITION. **Correction to the v4 plan:** the UTRD command type must
+  stay `UTP_CMD_TYPE_UFS_STORAGE` (1), not 0 — Linux's `ufshcd_comp_scsi_upiu`/
+  `ufshcd_compose_devman_upiu` use `UTP_CMD_TYPE_SCSI`(0)/`DEV_MANAGE`(2) only
+  when `ufs_version <= ufshci_version(1,1) = 0x110`, and the shim reads
+  `ver=0x200` (UFSHCI 2.0), so both use `UTP_CMD_TYPE_UFS_STORAGE` (the shim's
+  `1u<<28` was already right). SCSI commands now also drop the interrupt bit
+  (`ufshcd_prepare_req_desc_hdr` sets `UTP_REQ_DESC_INT_CMD` only for dev
+  commands). Builds clean (`-Wall -Wextra`, 0 ABS64, `out/Image.gz` 11,899 B);
+  image `shim-ufs6/shim-boot.img` `9fd02829…` (20,480 B, v4 `boot.img` only,
+  empty cpio ramdisk → `test_ufs` runs; stock `vendor_boot_a` supplies the DTB).
+  Read-only (no SCSI WRITE). **Test pending on slot `a`** (flash script
+  `win-flash-a-ufs6.ps1`, read script `win-ufs6-read.ps1`). Interpretation: if
+  `UFS RDFDI … val=0` and TUR/CAP/READ then return `rc=0`, the missing handshake
+  was the fix; if they still CHECK CONDITION, `UFS SENSE key=/asc=/ascq=` names
+  the reason.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
