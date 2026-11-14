@@ -16,6 +16,27 @@
  * ufs_mtk_pre_link DME writes, then DME_LINK_STARTUP with the retry loop.
  * Only then touch the transfer request list.
  *
+ * v3 (2026-11-12): ungate the UFS AO/PDN clock gates (ufs_mtk_init_clocks).
+ * Result: ABL already left every gate open (ao_sta/pdn_sta = 0) so the link
+ * failure was byte-identical. Disproven.
+ *
+ * v4 (2026-11-13): the missing step is the *device* reset. Linux
+ * ufshcd_init() calls ufshcd_device_reset() unconditionally before
+ * ufshcd_hba_enable(): ufs_mtk_device_reset() stops HCE, drives RST_n low via
+ * the MTK SiP SMC UFS_MTK_SIP_DEVICE_RESET, waits ~12 us, drives it high and
+ * waits ~12 ms. The live /proc/ufs_debug records exactly that event
+ * (dev_reset[0] = 0x0 at ~1.43 s), and the shim has only ever reset the host,
+ * never the device. Attempt 1 below is now Linux-exact (device reset + host
+ * reset + HCE + pre_link + LINK_STARTUP, with NO DME_RESET/DME_ENABLE, which
+ * the MTK HCE already performs in hardware); attempts 2/3 add those extras and
+ * a second device reset so the outcomes can be compared inside one boot.
+ *
+ * The M-PHY is confirmed a red herring: ufshci@112b0000 has no `phys` node,
+ * host->mphy is NULL and ufs_mtk_mphy_power_on() early-returns, so Linux never
+ * writes REG_UFS_MPHYCTRL/REG_UFS_EXTREG. The host reset itself is correct:
+ * ti,reset-bits flags 0x1c = ASSERT_SET|DEASSERT_SET|STATUS_NONE, so asserting
+ * sets the bit at 0x44 and deasserting sets the bit at 0x48.
+ *
  * Register layout and descriptor formats: JEDEC UFSHCI (JESD223).
  */
 #include <stdint.h>
@@ -96,11 +117,36 @@
 #define REG_MTK_XOUFS_CTRL	0x140
 #define REG_MTK_REFCLK_CTRL	0x144
 #define REG_MTK_MMIO_OPT_CTRL_0	0x160
+#define REG_MTK_EXTREG		0x2100
 #define REG_MTK_MPHYCTRL	0x2200
 #define REG_MTK_IP_VER		0x2240
+#define REG_MTK_REJECT_MON	0x22ac
+#define REG_MTK_DEBUG_SEL	0x22c0
+#define REG_MTK_PROBE		0x22c8
+#define REG_MTK_DEBUG_SEL_B0	0x22d0
+#define REG_MTK_DEBUG_SEL_B1	0x22d4
+#define REG_MTK_DEBUG_SEL_B2	0x22d8
+#define REG_MTK_DEBUG_SEL_B3	0x22dc
 
 #define REFCLK_REQUEST		0x1
 #define REFCLK_ACK		0x2
+
+/*
+ * MediaTek SiP SMC (ufs-mediatek.h): MTK_SIP_UFS_CONTROL = MTK_SIP_SMC_CMD(0x276)
+ * and MTK_SIP_SMC_CMD() = ARM_SMCCC_CALL_VAL(FAST_CALL, SMC_64, OWNER_SIP, fn)
+ * = 0xC2000000 | fn. The command selector goes in x1 and its argument in x2.
+ */
+#define MTK_SIP_UFS_CONTROL		0xC2000276UL
+#define UFS_MTK_SIP_DEVICE_RESET	(1u << 1)
+#define UFS_MTK_SIP_REF_CLK_NOTIFICATION (1u << 3)
+
+/* REG_UFS_PROBE >> 28 link states (ufs-mediatek.h enum). */
+#define VS_LINK_DISABLED	0
+#define VS_LINK_DOWN		1
+#define VS_LINK_UP		2
+#define VS_LINK_HIBERN8		3
+#define VS_LINK_LOST		4
+#define VS_LINK_CFG		5
 
 /*
  * syscon reset controllers (manaus live FDT): unipro_rst lives in
@@ -137,6 +183,25 @@
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
 static inline void ufs_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(UFS_BASE + off) = v; }
+
+/*
+ * Raw SMC, same convention as shim.c: x0 = function id, x1..x3 = arguments.
+ * Used for the MediaTek SiP UFS control calls Linux makes and the shim has so
+ * far skipped (device RST_n, reference clock notification).
+ */
+static uint64_t smc4(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	register uint64_t x0 __asm__("x0") = fn;
+	register uint64_t x1 __asm__("x1") = a1;
+	register uint64_t x2 __asm__("x2") = a2;
+	register uint64_t x3 __asm__("x3") = a3;
+	__asm__ volatile("smc #0"
+			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+			 :
+			 : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
+			   "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	return x0;
+}
 
 static uint64_t ticks(void);
 
@@ -336,6 +401,43 @@ static uint32_t mtk_hba_enable(void)
 	mtk_host_reset();
 	ufs_wr(REG_MTK_XOUFS_CTRL, ufs_rd(REG_MTK_XOUFS_CTRL) | 0x80);
 	return hce_start();
+}
+
+/*
+ * ufs_mtk_device_reset(): Linux drives the device RST_n through the MTK SiP
+ * SMC before it enables the host controller (ufshcd_init -> ufshcd_device_reset
+ * -> ufs_mtk_device_reset). The signal is active low: hold it low for at least
+ * 10 us, raise it, then let the device settle for 10-15 ms. This is the step
+ * v2/v3 skipped and the live /proc/ufs_debug records at boot.
+ */
+static void mtk_device_reset(void)
+{
+	uint64_t lo, hi;
+	hce_stop();
+	lo = smc4(MTK_SIP_UFS_CONTROL, UFS_MTK_SIP_DEVICE_RESET, 0, 0);	/* RST_n low */
+	delay_us(12);
+	hi = smc4(MTK_SIP_UFS_CONTROL, UFS_MTK_SIP_DEVICE_RESET, 1, 0);	/* RST_n high */
+	ufs_log2("UFS DEVRST", "lo=", lo, "hi=", hi);
+	delay_us(12000);
+}
+
+/*
+ * ufs_mtk_dbg_sel() + REG_UFS_PROBE >> 28: the link state machine Linux polls
+ * in ufs_mtk_wait_link_state(). Writing DEBUG_SEL is a read-only observation.
+ */
+static uint32_t probe_state(void)
+{
+	uint32_t hw = ufs_rd(REG_MTK_IP_VER);
+	if (((hw >> 16) & 0xff) >= 0x36) {
+		ufs_wr(REG_MTK_DEBUG_SEL, 0x820820);
+		ufs_wr(REG_MTK_DEBUG_SEL_B0, 0x00000000);
+		ufs_wr(REG_MTK_DEBUG_SEL_B1, 0x55555555);
+		ufs_wr(REG_MTK_DEBUG_SEL_B2, 0xaaaaaaaa);
+		ufs_wr(REG_MTK_DEBUG_SEL_B3, 0xffffffff);
+	} else {
+		ufs_wr(REG_MTK_DEBUG_SEL, 0x20);
+	}
+	return ufs_rd(REG_MTK_PROBE) >> 28;
 }
 
 /* ufs_mtk_setup_ref_clk(true): request the reference clock, wait for ACK. */
@@ -550,7 +652,7 @@ static void ufs_diag_dump(uint32_t rc)
 
 void test_ufs(void)
 {
-	ufs_log1("UFS", "milestone 5 probe v2: MTK host reset + link startup (read-only)");
+	ufs_log1("UFS", "milestone 5 probe v4: device reset + Linux-exact link startup (read-only)");
 	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
 	ufs_log2("UFS TIMER", "cntfrq=", timer_hz(), "hz", 0);
 
@@ -566,48 +668,63 @@ void test_ufs(void)
 	ufs_log2("UFS MTK", "ipver=", ufs_rd(REG_MTK_IP_VER), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
 	ufs_log2("UFS MTK", "refclk=", ufs_rd(REG_MTK_REFCLK_CTRL), "opt0=", ufs_rd(REG_MTK_MMIO_OPT_CTRL_0));
 	ufs_log2("UFS MTK", "mphyctrl=", ufs_rd(REG_MTK_MPHYCTRL), "hcs=", ufs_rd(REG_HCS));
+	ufs_log2("UFS MPHY", "ext=", ufs_rd(REG_MTK_EXTREG), "mphy=", ufs_rd(REG_MTK_MPHYCTRL));
+	ufs_log2("UFS REJ", "mon=", ufs_rd(REG_MTK_REJECT_MON), "probe=", probe_state());
 	ufs_log2("UFS RST", "ao44=", sc_rd(SYSCON_AO, RST_ASSERT), "ao48=", sc_rd(SYSCON_AO, RST_DEASSERT));
 	ufs_log2("UFS RST", "pdn44=", sc_rd(SYSCON_PDN, RST_ASSERT), "pdn48=", sc_rd(SYSCON_PDN, RST_DEASSERT));
 
 	/*
 	 * ABL leaves the controller enabled but the UniPro link half-broken
 	 * (PWR_LOCAL, UECPA pending). Replicate the Linux/MTK probe sequence:
-	 * ungate the UFS clocks (Linux ufs_mtk_init_clocks; the MPHY AO gates
-	 * may still be gated by ABL), reference clock on, host reset + HCE,
-	 * DME reset/enable, pre_link, then DME_LINK_STARTUP with the retry loop.
+	 * ungate the UFS clocks (ufs_mtk_init_clocks), reference clock on, reset
+	 * the device (ufshcd_init), host reset + HCE, pre_link, then
+	 * DME_LINK_STARTUP. Attempt 1 is Linux-exact; 2/3 add the v2/v3 extras.
 	 */
 	ufs_clocks_on();
 
 	uint32_t rc = refclk_on();
 	ufs_log2("UFS REFCLK", "rc=", rc, "reg=", ufs_rd(REG_MTK_REFCLK_CTRL));
 
-	rc = mtk_hba_enable();
-	ufs_log2("UFS HCE", "rc=", rc, "hce=", ufs_rd(REG_HCE));
-	ufs_log2("UFS HCE", "hcs=", ufs_rd(REG_HCS), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
-	ufs_wr(REG_IS, ufs_rd(REG_IS));		/* RW1C: drop stale UIC errors */
-
-	if (!(ufs_rd(REG_HCE) & 1)) {
-		ufs_log1("UFS", "HCE did not set: stop");
-		return;
-	}
+	/* v4: the device RST_n toggle Linux does before it enables the host. */
+	mtk_device_reset();
 
 	uint32_t ucmd = 0, ua2 = 0, ua3 = 0, urc;
-	urc = uic_cmd(UIC_DME_RESET, 0, 0, 0, &ucmd, &ua2, &ua3);
-	uic_log("UFS DMERST", UIC_DME_RESET, urc, ucmd, ua2, ua3);
-	urc = uic_cmd(UIC_DME_ENABLE, 0, 0, 0, &ucmd, &ua2, &ua3);
-	uic_log("UFS DMEEN", UIC_DME_ENABLE, urc, ucmd, ua2, ua3);
-
 	uint32_t link = 0;
+
 	for (int attempt = 0; attempt < 3 && !link; attempt++) {
+		const char *tag = attempt == 0 ? "UFS L1"
+		    : attempt == 1 ? "UFS L2" : "UFS L3";
+
+		if (attempt == 2)
+			mtk_device_reset();	/* fresh RST_n before the last try */
+
+		rc = mtk_hba_enable();
+		ufs_log2(tag, "hce=", rc, "hcs=", ufs_rd(REG_HCS));
+		ufs_log2(tag, "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL), "probe=", probe_state());
+		ufs_wr(REG_IS, ufs_rd(REG_IS));	/* RW1C: drop stale UIC errors */
+		if (!(ufs_rd(REG_HCE) & 1)) {
+			ufs_log1(tag, "HCE did not set");
+			continue;
+		}
+
+		/*
+		 * Attempt 1 is Linux-exact: the MTK HCE already resets and
+		 * enables the local UniPro in hardware, so Linux issues no
+		 * DME_RESET/DME_ENABLE here. Attempts 2/3 add them (the v2/v3
+		 * path) to compare inside one boot.
+		 */
+		if (attempt >= 1) {
+			urc = uic_cmd(UIC_DME_RESET, 0, 0, 0, &ucmd, &ua2, &ua3);
+			uic_log("UFS DMERST", UIC_DME_RESET, urc, ucmd, ua2, ua3);
+			urc = uic_cmd(UIC_DME_ENABLE, 0, 0, 0, &ucmd, &ua2, &ua3);
+			uic_log("UFS DMEEN", UIC_DME_ENABLE, urc, ucmd, ua2, ua3);
+		}
+
 		pre_link();
 		urc = uic_cmd(UIC_DME_LINK_STARTUP, 0, 0, 0, &ucmd, &ua2, &ua3);
-		uic_log("UFS LINKUP", UIC_DME_LINK_STARTUP, urc, ucmd, ua2, ua3);
+		uic_log(tag, UIC_DME_LINK_STARTUP, urc, ucmd, ua2, ua3);
 		link = !urc && (ua2 & 0xff) == 0;
-		if (!link && attempt < 2) {
-			rc = mtk_hba_enable();
-			ufs_log2("UFS REHCE", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
-			ufs_wr(REG_IS, ufs_rd(REG_IS));
-		}
+		ufs_log2(tag, "probe=", probe_state(), "dp=", (ufs_rd(REG_HCS) & HCS_DP) ? 1u : 0u);
 	}
 	ufs_log2("UFS LINK", "up=", link, "dev=", (ufs_rd(REG_HCS) & HCS_DP) ? 1u : 0u);
 

@@ -308,13 +308,63 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   whether ABL really left any gate closed. Builds clean (`-Wall -Wextra`,
   0 ABS64, `out/Image.gz` 10,792 B); image `shim-ufs4/shim-boot.img` `1a352a4b…`
   (20,480 B, v4 `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock
-  `vendor_boot_a` supplies the DTB). **Test pending** on slot `a`.
-- **Next if `shim-ufs4` (clock gates) still fails:** escalate to the MPHY.
-  Mainline's `mediatek,mt8183-ufsphy` node is absent from the manaus DT (only
-  USB phys exist), so the vendor kernel drives the MPHY through the
-  controller/firmware; the remaining candidates are `REG_UFS_MPHYCTRL` (0x2200),
-  a firmware SMC (`ufs_mtk_mphy_ctrl`), or the MTK `ufs_mtk_host_reset` reset
-  lines if my offset/bit reading is wrong.
+  `vendor_boot_a` supplies the DTB).
+- **`shim-ufs4` result (2026-11-12/13, read from pmsg after the `a`→`b`
+  fallback): clock gates are DISPROVEN as the fix.** `UFS CLK ao_sta=0
+  pdn_sta=0` both before and after the CLR writes — **ABL already left every
+  UFS AO/PDN clock gate open**, so `ufs_clocks_on()` changes nothing. The link
+  failure is byte-identical to `shim-ufs3` (`LINKUP op=0x16 rc=0 arg2=0x01`
+  ×3, `hcs=0x08`, `uecpa=0x80000010`, `LINK up=0 dev=0`). Host reset is
+  confirmed correct, not the fix.
+- **Verified against vendor source + live DT (2026-11-13):**
+  - **`ti,reset-bits` semantics + host reset are CORRECT.** Flags `0x1c` =
+    `STATUS_NONE|ASSERT_SET|DEASSERT_SET` (`include/dt-bindings/reset/ti-syscon.h`),
+    so assert sets the bit at `0x44` and deassert sets the bit at `0x48`. Live
+    DT: `syscon@112b8000` unipro_rst `<0x44 1 0x48 1 0 0 0x1c>`;
+    `syscon@112bc000` crypto_rst `<0x44 0 0x48 0 0 0 0x1c>` + hci_rst
+    `<0x44 1 0x48 1 0 0 0x1c>`. The shim's `mtk_host_reset()` matches Linux.
+  - **M-PHY is a RED HERRING.** `ufs_mtk_mphy_power_on(hba,on)` early-returns
+    when `host->mphy == NULL` (`if (!mphy || ...) return 0;`), and
+    `ufshci@112b0000` has no `phys` node, so `mphy=NULL`. Linux never writes
+    `REG_UFS_MPHYCTRL` (0x2200) / `REG_UFS_EXTREG` (0x2100) — it only *dumps*
+    them (`ufs_mtk_dbg_register_dump`). No firmware SMC MPHY path either.
+  - **MTK SiP SMC encoding:** `MTK_SIP_SMC_CMD(fn) = ARM_SMCCC_CALL_VAL(FAST_CALL,
+    SMC_64, OWNER_SIP, fn) = 0xC2000000|fn`; `MTK_SIP_UFS_CONTROL =
+    MTK_SIP_SMC_CMD(0x276) = 0xC2000276`; `x1` = command selector, `x2` = arg.
+    `UFS_MTK_SIP_DEVICE_RESET=BIT(1)=0x2`, `CRYPTO_CTRL=BIT(2)`,
+    `REF_CLK_NOTIFICATION=BIT(3)`, `HOST_PWR_CTRL=BIT(5)`, `DEVICE_PWR_CTRL=BIT(7)`.
+  - **Corrected link-state enum** (`REG_UFS_PROBE` 0x22c8 `>>28`):
+    `VS_LINK_DISABLED=0`, `DOWN=1`, `UP=2`, `HIBERN8=3`, `LOST=4`, `CFG=5`
+    (the earlier "UP=1/HIBERN8=9" reading was wrong). `ufs_mtk_dbg_sel` writes
+    `DEBUG_SEL(0x22c0)=0x820820`, `B0=0`, `B1=0x55555555`, `B2=0xaaaaaaaa`,
+    `B3=0xffffffff` when `(HW_VER 0x2240 >>16 & 0xff) >= 0x36`, else `0x20`.
+  - **Linux normal probe does NOT issue `DME_RESET`/`DME_ENABLE`** (MTK does not
+    set `UFSHCI_QUIRK_BROKEN_HCE`); those were an added step in the shim's
+    v2/v3 path, not Linux's.
+- **NEW root cause candidate (v4): the shim never resets the DEVICE, only the
+  host.** Linux `ufshcd_init()` (vendor `ufshcd.c` ~line 10000) calls
+  `ufshcd_device_reset(hba)` **unconditionally before `ufshcd_hba_enable`**.
+  `ufs_mtk_device_reset()` stops HCE, drives RST_n low via the MTK SiP SMC
+  `UFS_MTK_SIP_DEVICE_RESET`, waits 10–15 µs, drives it high, waits 10–15 ms.
+  Live `/proc/ufs_debug` records exactly that event (`dev_reset[0]=0x0 at
+  1431950 us`) with **no** `link_startup_fail`/`host_reset` — consistent with a
+  clean probe. Other `ufshcd_device_reset` callers (4243 link_recovery, 7458
+  host_reset_and_restore, 9283/9293 suspend, 10000 init) are not boot-time.
+- **`shim/ufs.c` v4 (image `shim-ufs5`), 2026-11-13.** Adds `smc4()`,
+  `mtk_device_reset()` (RST_n toggle via `0xC2000276` cmd `0x2`, `delay_us(12)`
+  low / `delay_us(12000)` high, logs the SMC return as `UFS DEVRST lo=/hi=`),
+  `probe_state()` (dbg_sel + `REG_UFS_PROBE>>28`), MPHY/EXTREG/REJECT_MON dumps,
+  and a 3-attempt link loop: **attempt 1 Linux-exact** (device reset + host
+  reset + HCE + pre_link + LINK_STARTUP, NO DME_RESET/ENABLE), attempts 2/3 add
+  DME_RESET/ENABLE and a second device reset, logging `UFS L1/L2/L3 hce=/hcs=/
+  xoufs=/probe=/dp=`. Builds clean (`-Wall -Wextra`, 0 ABS64, `out/Image.gz`
+  11,184 B); image `shim-ufs5/shim-boot.img` `71df5f23…` (20,480 B, v4
+  `boot.img` only, empty cpio ramdisk → `test_ufs` runs; stock `vendor_boot_a`
+  supplies the DTB). Read-only (no SCSI WRITE). **Test pending on slot `a`**
+  (flash script `win-flash-a-ufs5.ps1`, read script `win-ufs5-read.ps1`).
+  Interpretation: if SMC `DEVICE_RESET` returns `SIP_SVC_E_NOT_SUPPORTED` (-1)
+  the ATF lacks it; if attempt 1 links, the device reset was the missing step;
+  otherwise compare attempts 1/2/3.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
