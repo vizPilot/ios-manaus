@@ -431,6 +431,45 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   Next: read the iOS root out of `userdata` (HFS+) and hand it to XNU, replacing
   the ramdisk root.
 
+- **M6 plan (2026-11-13): read the iOS root out of `userdata` and hand it to
+  XNU.** Split in two, so the risky part stays isolated:
+  - **M6a (non-destructive): XNU finds and opens the UFS root device.** The
+    shim pre-initializes UFS *before* the XNU jump; XNU's `sweet_ufs.c` reuses
+    that state (it cannot bring the link up itself: no MTK SiP SMC/syscon code)
+    and only does `ufs_take_over_host()` + TUR + `ufs_find_partition`. Evidence
+    is the XNU console screen, not pmsg (the shim path jumps straight to XNU, so
+    there is no automatic `a`→`b` fallback and pmsg is not read). `debug=0xc`
+    keeps KDB in the panic, so the screen freezes and a **manual power cycle** is
+    needed. Expected: `SWEET UFS: "userdata" on LUN 2: first block 0x…, … MiB,
+    read-only` followed by an HFS+ mount failure (the Android `userdata` is
+    f2fs + inlinecrypt, encrypted — not HFS+). A mount failure is the **success
+    criterion** for M6a: it proves XNU drove the UFS root device end to end.
+  - **M6b (destructive, deferred): write the iPhone X iOS 16.7.16 HFS+ root
+    into `userdata` and boot `rd=ufsroot0` into it.** Needs the user-supplied
+    IPSW, `tools/mkiosroot.sh` (sudo, `apfs-fuse`, `mkfs.hfsplus`, ~16 GB disk)
+    and explicit approval to wipe the Android `userdata` (which deletes Android
+    user data; GPT is untouched).
+- **`shim/ufs.c` v6 (2026-11-13): `ufs_bringup()` factored out for the payload
+  path.** The proven v5 sequence (clock gates → refclk → device RST_n → host
+  reset + HCE → pre_link → `DME_LINK_STARTUP` 3-attempt loop → post_link → UTRL
+  takeover → NOP OUT + `fDeviceInit`) is now `ufs_bringup()`, returning 1 only
+  when the link is up *and* the host took our transfer request list. It issues
+  **no SCSI command** and leaves `HCE=1`, `HCS.DP=1`, `fDeviceInit` clear for
+  XNU. `test_ufs()` now calls it and keeps the TUR/CAP/READ/GPT probe on top.
+  `shim/loader.c` gains `has_substr()` and, before the kernel copy (MMU off, our
+  DMA buffers intact), calls `ufs_bringup()` when the payload cmdline contains
+  `ufsroot` (logs `UFS bring-up for rd=ufsroot0 (payload)` + `UFS up`).
+  `shim/ufs.h` declares `ufs_bringup()`. Builds clean (`-Wall -Wextra`, 0
+  ABS64; `out/Image` 200,704 B, `out/Image.gz` 12,069 B).
+- **M6a build (2026-11-13, `shim-m6a/`, NOT flashed yet).** Payload from the CI
+  kernel `kernel.development.sweet` `0283059c…` (contains the `0028` override)
+  + `manaus.adt` + cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 rd=ufsroot0
+  ufsroot=userdata`, **no `--ramdisk`**. Packaged v4 with the stock DTB blob
+  (249,100 B): `shim-m6a/shim-boot.img` `5aa0592d…` (16,613,376 B; kernel
+  12,069 + payload 16,594,128 as ramdisk) and `shim-m6a/shim-vendor_boot.img`
+  `53ce9f10…` (16,855,040 B; payload as vendor ramdisk + DTB). Flash `boot_a`
+  + `vendor_boot_a`, `set_active a`. **Awaiting explicit user approval.**
+
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
 `boot_a` (after backing it up) for the slot-fallback experiment only; it does

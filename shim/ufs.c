@@ -54,6 +54,14 @@
  * sets it only for device-management commands. Still read-only (no SCSI
  * WRITE).
  *
+ * v6 (2026-11-13): factor the proven v5 bring-up into ufs_bringup(), so the
+ * payload path can run it (MMU off) right before the jump to XNU when the
+ * cmdline says rd=ufsroot0. XNU's sweet_ufs.c cannot bring the link up itself
+ * (the bootloader leaves it half-broken and XNU has no MTK SiP SMC/syscon
+ * code); it only takes over the transfer request list and issues SCSI, so the
+ * shim must leave HCE=1, HCS.DP=1 and fDeviceInit clear. test_ufs() now calls
+ * ufs_bringup() and keeps the TUR/CAP/READ/GPT probe on top of it.
+ *
  * Register layout and descriptor formats: JEDEC UFSHCI (JESD223).
  */
 #include <stdint.h>
@@ -824,36 +832,22 @@ static void ufs_diag_dump(uint32_t rc)
 	ufs_log1("UFS DIAG", rc == 1 ? "timeout" : "ocs error");
 }
 
-void test_ufs(void)
+/*
+ * Bring the internal UFS link up and make the device usable, with the MMU off.
+ * This is the exact sequence proven on shim-ufs6 (v5): clock gates, reference
+ * clock, device RST_n (the missing step), host reset + HCE, pre_link,
+ * DME_LINK_STARTUP, post_link, take over the transfer request list, then the
+ * NOP OUT + fDeviceInit handshake ufshcd_probe_hba() does (the missing step
+ * for the logical units to be usable). No SCSI command is issued here.
+ *
+ * The payload path calls this before the jump when its cmdline says
+ * rd=ufsroot0: XNU's sweet_ufs.c reuses the state but can only take over the
+ * request list and issue SCSI (it does not know the MTK SiP SMC/syscon
+ * bring-up). Leaves HCE=1, HCS.DP=1 and fDeviceInit clear. Returns 1 when the
+ * link is up and the request list was taken, 0 otherwise.
+ */
+int ufs_bringup(void)
 {
-	ufs_log1("UFS", "milestone 5 probe v5: device reset + link + fDeviceInit handshake (read-only)");
-	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
-	ufs_log2("UFS TIMER", "cntfrq=", timer_hz(), "hz", 0);
-
-	uint32_t cap = ufs_rd(REG_CAP);
-	ufs_log2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
-	ufs_log2("UFS", "hce=", ufs_rd(REG_HCE), "hcs=", ufs_rd(REG_HCS));
-	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "ie=", ufs_rd(REG_IE));
-	ufs_log2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
-	ufs_log2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
-	ufs_log2("UFS UEC", "pa=", ufs_rd(REG_UECPA), "dl=", ufs_rd(REG_UECDL));
-	ufs_log2("UFS UEC", "net=", ufs_rd(REG_UECN), "tr=", ufs_rd(REG_UECT));
-	ufs_log2("UFS UEC", "dme=", ufs_rd(REG_UECDME), "is=", ufs_rd(REG_IS));
-	ufs_log2("UFS MTK", "ipver=", ufs_rd(REG_MTK_IP_VER), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
-	ufs_log2("UFS MTK", "refclk=", ufs_rd(REG_MTK_REFCLK_CTRL), "opt0=", ufs_rd(REG_MTK_MMIO_OPT_CTRL_0));
-	ufs_log2("UFS MTK", "mphyctrl=", ufs_rd(REG_MTK_MPHYCTRL), "hcs=", ufs_rd(REG_HCS));
-	ufs_log2("UFS MPHY", "ext=", ufs_rd(REG_MTK_EXTREG), "mphy=", ufs_rd(REG_MTK_MPHYCTRL));
-	ufs_log2("UFS REJ", "mon=", ufs_rd(REG_MTK_REJECT_MON), "probe=", probe_state());
-	ufs_log2("UFS RST", "ao44=", sc_rd(SYSCON_AO, RST_ASSERT), "ao48=", sc_rd(SYSCON_AO, RST_DEASSERT));
-	ufs_log2("UFS RST", "pdn44=", sc_rd(SYSCON_PDN, RST_ASSERT), "pdn48=", sc_rd(SYSCON_PDN, RST_DEASSERT));
-
-	/*
-	 * ABL leaves the controller enabled but the UniPro link half-broken
-	 * (PWR_LOCAL, UECPA pending). Replicate the Linux/MTK probe sequence:
-	 * ungate the UFS clocks (ufs_mtk_init_clocks), reference clock on, reset
-	 * the device (ufshcd_init), host reset + HCE, pre_link, then
-	 * DME_LINK_STARTUP. Attempt 1 is Linux-exact; 2/3 add the v2/v3 extras.
-	 */
 	ufs_clocks_on();
 
 	uint32_t rc = refclk_on();
@@ -937,7 +931,7 @@ void test_ufs(void)
 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
 	    !(ufs_rd(REG_UTRLRSR) & 1)) {
 		ufs_log1("UFS", "list base not taken: stop");
-		return;
+		return 0;
 	}
 
 	/*
@@ -950,7 +944,45 @@ void test_ufs(void)
 		rc = device_init();
 		ufs_log2("UFS DEVTINIT", "rc=", rc, "hcs=", ufs_rd(REG_HCS));
 	}
+	return link;
+}
 
+void test_ufs(void)
+{
+	ufs_log1("UFS", "milestone 5 probe v6: device reset + link + fDeviceInit handshake (read-only)");
+	ufs_log2("UFSBASE", "base=", UFS_BASE, "lun=", UFS_LUN);
+	ufs_log2("UFS TIMER", "cntfrq=", timer_hz(), "hz", 0);
+
+	uint32_t cap = ufs_rd(REG_CAP);
+	ufs_log2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
+	ufs_log2("UFS", "hce=", ufs_rd(REG_HCE), "hcs=", ufs_rd(REG_HCS));
+	ufs_log2("UFS", "is=", ufs_rd(REG_IS), "ie=", ufs_rd(REG_IE));
+	ufs_log2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
+	ufs_log2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
+	ufs_log2("UFS UEC", "pa=", ufs_rd(REG_UECPA), "dl=", ufs_rd(REG_UECDL));
+	ufs_log2("UFS UEC", "net=", ufs_rd(REG_UECN), "tr=", ufs_rd(REG_UECT));
+	ufs_log2("UFS UEC", "dme=", ufs_rd(REG_UECDME), "is=", ufs_rd(REG_IS));
+	ufs_log2("UFS MTK", "ipver=", ufs_rd(REG_MTK_IP_VER), "xoufs=", ufs_rd(REG_MTK_XOUFS_CTRL));
+	ufs_log2("UFS MTK", "refclk=", ufs_rd(REG_MTK_REFCLK_CTRL), "opt0=", ufs_rd(REG_MTK_MMIO_OPT_CTRL_0));
+	ufs_log2("UFS MTK", "mphyctrl=", ufs_rd(REG_MTK_MPHYCTRL), "hcs=", ufs_rd(REG_HCS));
+	ufs_log2("UFS MPHY", "ext=", ufs_rd(REG_MTK_EXTREG), "mphy=", ufs_rd(REG_MTK_MPHYCTRL));
+	ufs_log2("UFS REJ", "mon=", ufs_rd(REG_MTK_REJECT_MON), "probe=", probe_state());
+	ufs_log2("UFS RST", "ao44=", sc_rd(SYSCON_AO, RST_ASSERT), "ao48=", sc_rd(SYSCON_AO, RST_DEASSERT));
+	ufs_log2("UFS RST", "pdn44=", sc_rd(SYSCON_PDN, RST_ASSERT), "pdn48=", sc_rd(SYSCON_PDN, RST_DEASSERT));
+
+	/*
+	 * ABL leaves the controller enabled but the UniPro link half-broken
+	 * (PWR_LOCAL, UECPA pending). ufs_bringup() replicates the Linux/MTK
+	 * probe sequence (clocks, reference clock, device reset, host reset +
+	 * HCE, pre_link, DME_LINK_STARTUP, post_link, UTRL takeover, then the
+	 * NOP OUT + fDeviceInit handshake) and leaves the link up for the SCSI
+	 * probes below. The payload path calls the same function before it
+	 * jumps to XNU.
+	 */
+	int up = ufs_bringup();
+	ufs_log2("UFS BRINGUP", "up=", up, "hcs=", ufs_rd(REG_HCS));
+
+	uint32_t rc;
 	uint32_t ocs = 0, st = 0;
 	static const uint8_t tur[6] = { 0x00 };
 	/* A first command may report a unit attention; retry a few times. */

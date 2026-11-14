@@ -11,6 +11,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "ufs.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -74,6 +75,21 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+/* MMU-off substring search in a NUL-terminated string (no libc here). */
+static int has_substr(const char *hay, const char *needle)
+{
+	for (; *hay; hay++) {
+		const char *h = hay, *n = needle;
+		while (*n && *h == *n) {
+			h++;
+			n++;
+		}
+		if (!*n)
+			return 1;
+	}
+	return 0;
+}
+
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
 /*
@@ -124,6 +140,19 @@ const char *loader_boot(uintptr_t dtb)
 		if ((s->file_off & 7) || s->file_size > s->vmsize ||
 		    s->file_off > plen || s->file_size > plen - s->file_off)
 			return "bad payload segment";
+	}
+
+	/*
+	 * If the payload asks for the internal UFS as root (rd=ufsroot0), bring
+	 * the link up and run the fDeviceInit handshake here, with the MMU off.
+	 * XNU's sweet_ufs.c reuses this state but can only take over the request
+	 * list and issue SCSI: it has no MTK SiP SMC/syscon bring-up, and the
+	 * bootloader leaves the link half-broken. Read-only: no SCSI command is
+	 * issued here. Do it before the copy so our DMA buffers are intact.
+	 */
+	if (has_substr(p->cmdline, "ufsroot")) {
+		con_str("UFS", "bring-up for rd=ufsroot0 (payload)");
+		con_hex("UFS up", (uint64_t)ufs_bringup());
 	}
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
