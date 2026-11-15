@@ -505,6 +505,53 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   on this path); the phone needs a **manual power cycle** (Power+VolDown) to
   leave the frozen screen.
 
+- **M6b build (2026-11-14): the iPhone X iOS 16.7.16 HFS+ root image is built,
+  verified, and ready to flash to `userdata`.** Source IPSW (user-supplied, not
+  in git) `iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw`, sha256
+  `ece1194f7e233e9109c5790a8d23a4564a10a254e15ec5b09978a343265568fb`. BuildManifest
+  maps OS=`087-86698-044.dmg` (4,730,814,044 B), SystemOS (`Cryptex1,SystemOS`)
+  =`087-86593-047.dmg` (2,743,074,816 B), AppOS (`Cryptex1,AppOS`)
+  =`087-86715-047.dmg` (10,485,760 B). The `apfs-fuse` read path was validated
+  first (both cryptex dmgs mount; `/root/System`, `/root/usr` present).
+  - **WSL2 blocker + workaround.** `tools/mkiosroot.sh` populates the image by
+    loop-mounting it, but WSL2's stock kernel has `CONFIG_HFSPLUS_FS` **not set**
+    (and no module), and `CONFIG_MODVERSIONS=y` rules out a loadable module, so
+    nothing could write files into the image. Fix (user-approved, reversible):
+    built a WSL2 kernel from Microsoft's exact tag `linux-msft-wsl-6.18.33.2`
+    (HEAD `c21a03b29`) using their shipped `Microsoft/config-wsl` with
+    `CONFIG_HFSPLUS_FS=y` added (plus `HFSPLUS_FS_POSIX_ACL`; cleared
+    `SYSTEM_TRUSTED_KEYS`/`SYSTEM_REVOCATION_KEYS`). `bzImage` 17,392,128 B,
+    sha256 `72219dc5937746e398e1ef20b8f1b5931d7ffff06ca609a1a8a3e560c0fd8cb4`,
+    installed at `C:\Users\vicen\wsl-kernel\bzImage` and selected via
+    `%USERPROFILE%\.wslconfig` `[wsl2] kernel=…`; `wsl --shutdown` activates it
+    (undo = delete the `kernel=` line). Verified: `hfsplus` in
+    `/proc/filesystems` and a loop-mounted HFS+ image survives a write/read
+    round-trip.
+  - **Image build:** `bash tools/mkiosroot.sh 087-86698-044.dmg 087-86593-047.dmg
+    087-86715-047.dmg ios16-root-20H392-manaus.img 16G` as root → 16 GiB raw
+    HFS+ (12 GiB used; `fsck.hfsplus` OK; case-sensitive, journaled, volume
+    `iOSRoot`; cryptex hard-links created). Raw sha256
+    `fcda1a0e1d69b0637d38418cf40c8b53837138d94449f8da251d32d0d673b6ba`.
+  - **Sparse image (the flash artifact):**
+    `D:\manaus\ios16-root\ios16-root-20H392-manaus.simg`, 12,145,467,716 B,
+    sha256 `1f533e9e819d17cdb3baa3a7ae9eac128d197ec5bd40339743f68288a929568a`.
+    **Verified byte-exact**: a pure-Python sparse reader reconstructs the raw
+    image (size 17,179,869,184; sha256 matches `fcda1a0e…`). Content spot-check:
+    `launchd`/`SpringBoard`/`mobileactivationd`/`AppleKeyStore` ASCII strings
+    present.
+  - **`C:` is nearly full (~2.2 GB free).** The first `img2simg` wrote the .simg
+    to the WSL fs and failed `Read-only file system` when the WSL VHDX
+    (`C:\Users\vicen\AppData\Local\wsl\{070d288b-…}\ext4.vhdx`, 81 GB) could not
+    grow; writing the .simg to `D:` instead fixed it. The raw image was deleted
+    and `fstrim` run (WSL internal 73→61 GB). **Reclaiming `C:` needs an elevated
+    `diskpart compact vdisk`, or `wsl --manage Ubuntu-24.04 --set-sparse true
+    --allow-unsafe` (discouraged while `C:` is nearly full).** The three dmgs are
+    kept in `/root/iosroot-build` for rebuilds.
+  - **Next:** flash `userdata` with the .simg (destructive: wipes Android user
+    data; GPT untouched) with explicit user approval, then boot the M6a v2 images
+    (slot `a`, already `rd=ufsroot0 ufsroot=userdata sweet*=0`) and read the XNU
+    screen. Flash helper: `Temp\opencode\win-flash-userdata-m6b.ps1`.
+
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
 `boot_a` (after backing it up) for the slot-fallback experiment only; it does
