@@ -461,14 +461,38 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   `ufsroot` (logs `UFS bring-up for rd=ufsroot0 (payload)` + `UFS up`).
   `shim/ufs.h` declares `ufs_bringup()`. Builds clean (`-Wall -Wextra`, 0
   ABS64; `out/Image` 200,704 B, `out/Image.gz` 12,069 B).
-- **M6a build (2026-11-13, `shim-m6a/`, NOT flashed yet).** Payload from the CI
-  kernel `kernel.development.sweet` `0283059c…` (contains the `0028` override)
+- **M6a build v1 (2026-11-13, `shim-m6a/`).** Payload from the CI kernel
+  `kernel.development.sweet` `0283059c…` (contains the `0028` override)
   + `manaus.adt` + cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 rd=ufsroot0
   ufsroot=userdata`, **no `--ramdisk`**. Packaged v4 with the stock DTB blob
   (249,100 B): `shim-m6a/shim-boot.img` `5aa0592d…` (16,613,376 B; kernel
   12,069 + payload 16,594,128 as ramdisk) and `shim-m6a/shim-vendor_boot.img`
-  `53ce9f10…` (16,855,040 B; payload as vendor ramdisk + DTB). Flash `boot_a`
-  + `vendor_boot_a`, `set_active a`. **Awaiting explicit user approval.**
+  `53ce9f10…` (16,855,040 B; payload as vendor ramdisk + DTB). Flashed to
+  `boot_a` + `vendor_boot_a` (`set_active a`) with user approval.
+- **M6a v1 RESULT: XNU panics in `sweet_keys_init()`, NOT a UFS failure.**
+  Panic `Kernel data abort`, pc `0xfffffe00074e9ff8` = `_sweet_keys_init+0xac`
+  (`ldr w8, [x8]` with `x8 = ml_io_map(0xc440000, 0x2000)`), LR
+  `0xfffffe00074e8da4` = `_sweet_ufs_rootdev+0x6cc`, backtrace
+  `sweet_ufs_rootdev` ← `IOFindBSDRoot+0x6b4` ← `bsd_init+0x5a4`. The UFS
+  bring-up itself succeeded: the `SWEET UFS: "userdata" on LUN 2 …` printf runs
+  *before* the driver calls. Root cause: base patch `0060` calls
+  `sweet_keys_init()`/`sweet_touch_init()` and `0072` calls `sweet_usb_probe()`
+  at the end of `sweet_ufs_rootdev()`; those are Qualcomm (sweet) drivers whose
+  MMIO (SPMI `0xc440000` etc.) does not exist on MT6879. Milestones C/D
+  (`rd=md0`) never called `sweet_ufs_rootdev`, so they never hit it.
+- **M6a fix = boot-args, not a kernel rebuild.** All three drivers return early
+  when disabled (`sweetkeys=0`/`sweettouch=0`/`sweetusb=0`; verified in the
+  post-patch sources: `sweet_keys.c:134`, `sweet_touch.c:647`,
+  `sweet_usb.c:84`), so the same CI kernel `0283059c…` works. Rebuilt payload
+  (`shim-m6a2/`) with cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 rd=ufsroot0
+  ufsroot=userdata sweetkeys=0 sweettouch=0 sweetusb=0`, no ramdisk; v4 with the
+  stock DTB blob: `shim-m6a2/shim-boot.img` `f20fc850…` (16,613,376 B) and
+  `shim-m6a2/shim-vendor_boot.img` `d6da65d6…` (16,855,040 B; `dtb_size` 249100,
+  `dtb_addr` 0x47c80000). `shim/out/Image` re-verified byte-identical to the
+  committed v6 source (`3769d0a7…`). **Awaiting explicit user approval to flash
+  `boot_a` + `vendor_boot_a`.** Evidence is the XNU console screen (no
+  automatic `a`→`b` fallback on this path); `debug=0xc` keeps KDB in the panic,
+  so a **manual power cycle** is needed after.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
