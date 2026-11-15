@@ -489,10 +489,21 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
   stock DTB blob: `shim-m6a2/shim-boot.img` `f20fc850…` (16,613,376 B) and
   `shim-m6a2/shim-vendor_boot.img` `d6da65d6…` (16,855,040 B; `dtb_size` 249100,
   `dtb_addr` 0x47c80000). `shim/out/Image` re-verified byte-identical to the
-  committed v6 source (`3769d0a7…`). **Awaiting explicit user approval to flash
-  `boot_a` + `vendor_boot_a`.** Evidence is the XNU console screen (no
-  automatic `a`→`b` fallback on this path); `debug=0xc` keeps KDB in the panic,
-  so a **manual power cycle** is needed after.
+  committed v6 source (`3769d0a7…`). **Flashed 2026-11-14 with user approval**
+  (`shim-m6a2/`, `set_active a`: `current-slot a`, `slot-successful:_a no`,
+  `_b yes`, `slot-retry-count:_a 7`, `_b 1`; `boot_a` and `vendor_boot_a` both
+  `OKAY`).
+- **✅ M6a RESULT (2026-11-14): XNU opens the UFS root device. MILESTONE M6a
+  DONE.** Screen shows `SWEET UFS: "userdata" on LUN 2: first block 0x22c800,
+  235143 MiB, read-only`, followed by an **HFS+ mount failure and a frozen
+  screen** (the expected success criterion: Android `userdata` is f2fs +
+  inlinecrypt, not HFS+, and `debug=0xc` freezes KDB). XNU drove the UFS root
+  device end to end: it took over the host the shim left ready, read the LUN-2
+  GPT, found `userdata` and printed its geometry, then failed to mount it as
+  HFS+. No panic in the Qualcomm drivers any more (the `sweet*=0` boot-args did
+  their job). Evidence is the XNU console screen (no automatic `a`→`b` fallback
+  on this path); the phone needs a **manual power cycle** (Power+VolDown) to
+  leave the frozen screen.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
