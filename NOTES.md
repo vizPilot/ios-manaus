@@ -547,10 +547,43 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
     `diskpart compact vdisk`, or `wsl --manage Ubuntu-24.04 --set-sparse true
     --allow-unsafe` (discouraged while `C:` is nearly full).** The three dmgs are
     kept in `/root/iosroot-build` for rebuilds.
-  - **Next:** flash `userdata` with the .simg (destructive: wipes Android user
-    data; GPT untouched) with explicit user approval, then boot the M6a v2 images
-    (slot `a`, already `rd=ufsroot0 ufsroot=userdata sweet*=0`) and read the XNU
-    screen. Flash helper: `Temp\opencode\win-flash-userdata-m6b.ps1`.
+  - **✅ M6b FLASH RESULT (2026-11-16): the 12 GB iOS root IS now on
+    `userdata`.** All 47/47 fragments `OKAY`, exit 0, 8m05s
+    (`fastboot flash userdata`). This required first working around a bootloader
+    bug (below). The flashed artifact is
+    `D:\manaus\ios16-root\ios16-root-20H392-manaus-fix.simg`, 12,145,755,276 B,
+    sha256 `5b42e982a41b21760199cbe1dd111f453a0efafa53f1c7b06d6b8fbcb4eb3038`.
+  - **Root cause of the earlier `sparse image write failure` (proven, not
+    guessed):** the MTK bootloader's `write_sparse_image()` (u-boot
+    `lib/image-sparse.c`) accumulates `total_blocks` per chunk and finally checks
+    `total_blocks != sparse_header->total_blks`. **A single chunk whose BYTE size
+    exceeds 4 GiB overflows 32-bit arithmetic on the 32-bit bootloader**, so
+    `total_blocks` comes out wrong and the check fails at the last fragment.
+    Controlled evidence (all `fastboot flash userdata`):
+      - T1 400 MiB random (2 frag) ✅; T2 + trailing fill ✅; T1 `-S 200M` (3 frag) ✅
+      - T5 = 2 GiB raw (512 MiB random + 1.5 GiB zeros): FILL chunk 1.5 GiB ✅
+      - T6 = 5 GiB raw (512 MiB random + 4.5 GiB zeros): FILL chunk 4.5 GiB ❌
+        `sparse image write failure` at frag 3/3
+      - **T6b = same 5 GiB total**, but the 4.5 GiB FILL split into <4 GiB pieces:
+        ✅ (frag 3/3 wrote 15.8 s, exit 0)
+    `fastboot -S` cannot help: `get_sparse_limit` returns 0 when `size <= limit`
+    (→ one download, but R34 buffers the whole 12 GB → `std::bad_alloc`), and the
+    device strictly enforces `max-download-size = 256 MiB` (`Data size exceeds
+    download buffer` otherwise), so `-S` can only make fragments smaller.
+    The host resparse puts a whole FILL chunk in one fragment regardless of its
+    raw span (fragment limit is on SPARSE size), and `sparse_file_import`'s
+    `merge_bb()` re-merges adjacent same-type FILLs, so pre-chunking the `.simg`
+    alone does not survive to the wire.
+  - **Fix:** `Temp\opencode\breakfills.py` re-chunks the `.simg` so no FILL chunk
+    exceeds 64 MiB, inserting a **1-block RAW separator holding the same fill
+    value** between pieces. `merge_bb()` only merges same-type+adjacent blocks, so
+    the separators prevent re-merging; the bytes written are identical. Verified
+    with `diag4` (libsparse import+resparse of the fixed image): 47 fragments,
+    `max_block_len = 64 MiB`, `blocks_over_4GiB = 0`.
+  - **Boot step (in progress):** `fastboot reboot` into the M6a v2 images on slot
+    `a` (already `rd=ufsroot0 ufsroot=userdata sweet*=0`); read the XNU console on
+    the panel. Helpers: `Temp\opencode\flash-big-fix.ps1`,
+    `Temp\opencode\win-boot-m6b.ps1`.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
