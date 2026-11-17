@@ -20,6 +20,18 @@ source** (Libinfo `_fsi_get_fs`): with no `/etc/fstab`, libinfo *synthesizes* a
 writable `/` entry, so `mount` tries `mount_hfs -o update /`; the fix is to ship
 `/etc/fstab` with a `ro,noauto` root entry.
 
+**✅ BOOT #5 (2026-11-17): the read-write cmdline worked.** With `ufsrw=1
+rootrw=1` the `tzinit` panic is gone and the phone reached the iOS **userspace
+boot UI (Apple logo + progress bar)** — the furthest yet. The bar then stalled
+with console text = the **known-benign** `bluetoothd`/`fairplayd.H2` respawn
+loop. Root cause found: the manaus root image was a **raw `mkiosroot.sh` output
++ only `/etc/fstab`** — it never had `tools/sweet-root-tweaks.py` applied, so it
+lacks the data-migration skip (the bar *is* the ~60 min `cpus=1` migration), the
+`/private/var/containers` dirs, the launchd `_PanicOnCrash`/CommCenter fixes,
+the Setup skip, `BKNoWatchdogs`, the audio/MediaToolbox fixes and the activation
+data ark. Fix = apply that recipe and reflash `userdata` only (see the M6b
+section, line ~860). **Next: BOOT #6** with the tweaked image.
+
 **✅ BOOT #4 (2026-11-17): the `/etc/fstab` fix WORKED** — the `mount[31]` panic
 is gone. The new panic is the next `RequireSuccess` boot task,
 **`/usr/libexec/tzinit` (pid 17)**, exiting non-zero because it cannot create
@@ -856,6 +868,63 @@ those args).
     never write multi-GB files into `$HOME`. The ext4 vhdx is at
     `%LOCALAPPDATA%\wsl\{cb33febd-…}\ext4.vhdx` (73 GB); the distro could be
     moved to D: later with `wsl --manage Ubuntu-24.04 --move D:\...`.
+
+**✅ BOOT #5 (2026-11-17): `ufsrw=1 rootrw=1` worked — the `tzinit` panic is gone
+and the system reached the iOS userspace boot UI.** After flashing boot #5
+(`boot_a`+`vendor_boot_a`, images in `D:\manaus\shim-m6b5\`) the panel showed the
+**Apple logo + an animated boot progress bar** (userspace UI, drawn by
+backboardd) — the furthest any boot has reached. The bar advanced very slowly
+for >10 min and then stopped advancing, with **console text overlaying it**.
+Photos: `D:\manaus\apple-text.jpg` and `D:\manaus\apple-again.jpg` (both
+4000×3000 EXIF-6; OCR'd with the Windows.Media.Ocr helpers in
+`%TEMP%\opencode\ocr-tiles.ps1` — crop X0=0, X1=0.73, Rows=5, OutW=4800).
+The console text is a repeating **`exec xpcproxy exec bluetoothd` /
+`exec xpcproxy exec fairplayd.H2`** loop (patch `0042` prints `exec %s` for
+every unentitled exec). That loop is **known-benign**: `bluetoothd` and
+`fairplayd.H2` relaunch constantly on sweet too (no hardware) and sweet still
+reached SpringBoard/Setup (lines 903/951/1004). So the loop is **not** the wall.
+A line OCR'd as `SWEET KEYS: corrupted … 17 args … in 1/0 out 0/4096` is really
+`SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x` (the AppleKeyStore
+selector trace) — OCR noise, also benign.
+
+**Root cause of the slow/stuck boot #5 (proven 2026-11-17): the manaus root
+image was missing the ENTIRE sweet bring-up recipe.** Mounting the exact
+flashed content (expansion of `-fstab-bf.simg`; `D:\manaus\ios16-root\_mnt\raw.img`,
+WSL `mount -t hfsplus -o loop,ro,force`) showed the image is a raw
+`tools/mkiosroot.sh` output **plus only `/private/etc/fstab`**. It never had
+`tools/sweet-root-tweaks.py` applied — the script whose own docstring says it is
+"what turned the plain mkiosroot.sh output into the images that reach the home
+screen (image versions v8-v14)". Verified absent in the flashed image:
+- **no data-migration skip** → on sweet the very first iOS pixels were the
+  **data-migration screen (Apple logo + progress bar)**, which took **~60 min on
+  `cpus=1`** (line 951). The manaus boot #5 bar is that migration running because
+  nothing told DataMigration to skip it. (`com.apple.migration.plist`
+  `LastSystemVersion`, `ByHost` and `DMUserDataDisposition` were all absent.)
+- no `/private/var/containers/{Bundle,Data/System,Shared/SystemGroup,Temp}`
+- `launchd.plist` still had **7 `_PanicOnCrash`** keys and **CommCenter jobs**
+  (a crashing daemon would panic the kernel)
+- no Setup skip (`com.apple.purplebuddy*` absent), no SpringBoard
+  `BKNoWatchdogs`, `VirtualAudio.plugin` still in `HAL/` (mediaserverd crash
+  loop), MediaToolbox `StartRecorderServer` still true, no mobileactivationd
+  data ark.
+
+**Fix (2026-11-17): apply `tools/sweet-root-tweaks.py` to the manaus root and
+reflash `userdata`.** Script `D:\manaus\build-tweaks.sh` mounts `raw.img` RW,
+runs the tweaks (output: 7 `_PanicOnCrash` renamed, 2 CommCenter jobs removed,
+containers created, VirtualAudio disabled, `StartRecorderServer=false` on
+D22/D221/Default, migration/springboard/purplebuddy/managedconfiguration prefs
+written; the mobileactivationd data ark is skipped because that container does
+not exist in a pure OS-root image), `fsck.hfsplus` OK, then `img2simg` +
+`tools/breakfills.py` + `libsparse/diag4` + `tools/verify-simg.py`.
+Result `D:\manaus\ios16-root\ios16-root-20H392-manaus-tweaks-bf.simg`:
+**12,145,771,676 B, sha256
+`2d35601cb701766fcca8b9846246ddd93f408d406b6b4b8d38837935bd911d1e`**, `diag4`
+47 fragments / `max_block_len` 64 MiB / `blocks_over_4GiB=0` VERDICT OK,
+`verify-simg` MATCH (expands to `raw.img` `a1f43bcb…`). `boot_a`/`vendor_boot_a`
+stay on the boot #5 images (the `ufsrw=1 rootrw=1` cmdline is correct); only
+`userdata` is re-flashed (`D:\manaus\flash-tweaks.ps1`). **✅ FLASH DONE
+(2026-11-17): 47/47 fragments `OKAY`, exit 0, 8m32s** (image sha verified before
+writing); `fastboot reboot` issued → **BOOT #6 running.**
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
