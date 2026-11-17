@@ -8,6 +8,16 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 (`origin` = fork, `upstream` = dipa-studio/ios-sweet). No `sweet_*` renames:
 `SWEET` is the name of the platform layer, not the device.
 
+**CURRENT (2026-11-17) — M6b, iOS 16.7.16 root on `userdata` (jump to line ~583).**
+The iPhone X HFS+ root is flashed to `userdata` and the kernel **mounts it and
+executes `/sbin/launchd`**. Boot #2 then panicked on the wrong-platform exec kill
+(`OS_REASON_EXEC`/`EXEC_EXIT_REASON_WRONG_PLATFORM`), fixed by the boot-arg
+`unentitled_ios_sim_launch=1`. Boot #3 (`shim-m6b2`, full known-good sweet set,
+no read-write args) was flashed to `boot_a`+`vendor_boot_a` on 2026-11-17:
+`shim-boot.img` `3e2ecdaa…`, `shim-vendor_boot.img` `ebd2f2d6…`. **Next:** read
+the XNU console on the panel for `Allowing spawn of iOS binary …` and the next
+blocker (likely `launchd_cache_loader`/AMFI or libignition/preboot).
+
 **State:**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
   `xnu-8796.141.3`, verified locally (the only two that need the HFS staging
@@ -584,6 +594,54 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
     `a` (already `rd=ufsroot0 ufsroot=userdata sweet*=0`); read the XNU console on
     the panel. Helpers: `Temp\opencode\flash-big-fix.ps1`,
     `Temp\opencode\win-boot-m6b.ps1`.
+  - **✅ M6b BOOT #2 (2026-11-16): the HFS+ root MOUNTED and XNU executed
+    `/sbin/launchd` from it.** Fix A worked: the `hfs: Initializing the journal`
+    / `late jnl init` failure is gone. Photo `D:\manaus\kernel_panic.jpg` (OCR
+    garbles some glyphs).
+  - **M6b boot #2 panic root cause = wrong-platform exec kill, NOT code signing
+    pages.** `unexpected SIGKILL of launchd (CS_KILLED) with reason -- namespace 9
+    code 0xe` = `OS_REASON_EXEC` (9) / `EXEC_EXIT_REASON_WRONG_PLATFORM` (14).
+    `psignal_internal` panics on initproc (`bsd/kern/kern_sig.c:2072-2083`); the
+    EACCES is set at `bsd/kern/kern_exec.c:7633`. The kernel is
+    `XNU_TARGET_OS_OSX`; `launchd` is `PLATFORM_IOS` and `load_init_program`
+    execs it with **no spawn platform attribute**, so the DEVELOPMENT tunable
+    `unentitled_ios_sim_launch=1` (`kern_exec.c:196`, honored at `:7626`) is
+    required. `handshake structure not initialized` is KDP coredump noise
+    (`osfmk/kdp/output_stages/out_shmem.c:499`), unrelated. **This is the same
+    panic the original project hit at boot 0029u** (see the WRONG_PLATFORM note
+    near the end of this file). **Fix = boot-arg, not a kernel rebuild.**
+  - **M6b boot #3 build + flash (2026-11-17).** New payload cmdline (full
+    known-good sweet set, **no** read-write args; UFS is still read-only):
+    `debug=0xc serial=3 cpus=1 keepsyms=1 rd=ufsroot0 ufsroot=userdata
+    sweetkeys=0 sweettouch=0 sweetusb=0 unentitled_ios_sim_launch=1
+    launchd_unsecure_cache=1 ignition_level=1 wdt_test=no_user_checkin wdt=-1`.
+    Payload `Temp\opencode\shim-m6b2\payload.bin` (16,594,128 B; CI kernel
+    `0283059c…` + shim `Image` `3769d0a7…`). Images (stock 249,100 B DTB blob,
+    header v4):
+      - `shim-boot.img` 16,613,376 B sha256
+        `3e2ecdaaee81468e0b42726d24e8d6801eb2ccd6bef7a289ab49274d197c4381`
+        — **byte-identical to the proven M6a v2 boot.img except the 102-byte
+        cmdline extension** (`signature_size 0`).
+      - `shim-vendor_boot.img` 16,855,040 B sha256
+        `ebd2f2d6dc5d2eda59a5357c04524b1ba9cf34a6ca18d309f7a828f4b7dbbd5d`.
+    Both payloads verified: magic `SWEETXNU`, exact new cmdline, dtb 249,100 B.
+  - **`mkbootimg` tooling (was missing in WSL; PyPI has no `mkbootimg`
+    package).** Installed the Ubuntu/Debian package script (`apt-get download
+    mkbootimg` = `1:34.0.4-1build3`) at `~/.local/bin/mkbootimg`. It appends the
+    v4 boot signature **only** when `--gki_signing_key` is set, so it emits
+    `signature_size 0` — matching the proven M6a v2 image (stock, by contrast,
+    has `signature_size 4096`; both are accepted by LK). The Debian script
+    imports `gki.generate_gki_certificate` at load time but the `.deb` does not
+    ship it (it is only used in the GKI-signing path, which
+    `tools/mkbootimg-manaus.sh` never takes) → stubbed at `~/.local/bin/gki/`.
+    AOSP 12.1 `mkbootimg.py` was tried first but unconditionally appends a
+    4,096-byte signature. **`~/.local/bin` is not on PATH for non-login WSL
+    shells** (`wsl -- bash script`), so build scripts must
+    `export PATH="$HOME/.local/bin:$PATH"`.
+  - **Flash (2026-11-17, user-approved):** `fastboot flash boot_a` +
+    `vendor_boot_a` both `OKAY`; `set_active a` ("Slot already set active");
+    `reboot`. Watch for the new kernel print `Allowing spawn of iOS binary …`.
+    **Result: pending the panel photo.**
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
