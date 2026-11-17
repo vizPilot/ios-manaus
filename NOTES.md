@@ -38,20 +38,48 @@ pristine IPSW, not OCR (see the M6b section, line ~696):
   `/sbin/launchd`) lists **`tzinit` as `RequireSuccess`** → its non-zero exit
   triggers the initproc panic.
 
-**Next: give the root WRITE access.** The base series already has the code
-(`patches/0030-sweet-ufs-writes.patch`: WRITE(10) `0x2a`, UPIU dir `0x20`,
-read-modify-write for sub-4K, `DKIOCSYNCHRONIZE(CACHE)`, `DKIOCISWRITABLE`,
-`DKIOCGETMAXBLOCKCOUNTWRITE`, `sweet_ufs_write` via physio `B_WRITE`, all
-gated on **`ufsrw=1`**; `patches/0031-sweet-read-write-root.patch` adds
-**`rootrw=1`** to clear `MNT_RDONLY`) — but the manaus override
-`patches-manaus/0028-sweet-ufs-root-device.patch` **replaces** `sweet_ufs.c`
-with a from-scratch MTK polled **read-only** shim (no `writable`, write →
-EROFS, `DKIOCISWRITABLE` → 0), so **writes are NOT active on manaus**. The fix
-is to port the `0030` write logic into the manaus `0028` shim and add
-`ufsrw=1 rootrw=1` to the payload cmdline (the sweet precedent reached
-SpringBoard with exactly those args).
+**Next: give the root WRITE access — the fix is the CMDLINE, not a kernel
+rebuild.** (Corrected 2026-11-17.) The flashed kernel **already contains the
+write code**: `patches/0030-sweet-ufs-writes.patch` (WRITE(10) `0x2a`, UPIU
+dir `0x20`, read-modify-write for sub-4K, `DKIOCSYNCHRONIZE(CACHE)`,
+`DKIOCISWRITABLE`, `DKIOCGETMAXBLOCKCOUNTWRITE`, `sweet_ufs_write` via physio
+`B_WRITE`, gated on **`ufsrw=1`**) applies cleanly on top of the manaus `0028`
+shim (all 15 hunks; `git apply --check` passes exactly as CI's `build.sh`
+does), and `patches/0031-sweet-read-write-root.patch` (**`rootrw=1`** clears
+`MNT_RDONLY`). Proof is in the **flashed kernel binary itself** (CI artifact
+`xnu-manaus-kernel`, run #86 `43537307843`, `head e69054e`, downloaded to
+`D:\manaus\ci-kernel\kernel.development.sweet`, sha256 `0283059c…`): its
+strings include `ufsrw`, `rootrw`, `SWEET UFS: refusing write of %u blocks at
+0x%llx`, `read-write`/`read-only`, `_sweet_ufs_strategy`/`_sweet_ufs_bioctl`
+and `hfs_mounthfsplus: SWEET: mounting dirty non-journaled root read-write`.
+The earlier "the manaus `0028` shim is read-only, so writes are NOT active on
+manaus" conclusion was **wrong**: the manaus `0028` differs from the base only
+by `su.lun = 2`. So M6b needs **no kernel change** — only `ufsrw=1 rootrw=1`
+in the payload cmdline (the sweet precedent reached SpringBoard with exactly
+those args).
 
 **State:**
+- **M6b boot #5 images BUILT (2026-11-17), ready to flash** (`D:\manaus\shim-m6b5\`):
+  payload `0f876cc9…` (16,594,128 B) = CI kernel `0283059c…` + on-disk
+  `shim/out/manaus.adt` `13a6e2ba…` + cmdline = the boot #3 set **+ `ufsrw=1
+  rootrw=1`** (220 B). `shim-boot.img` `56c61fbf…` (16,613,376 B) and
+  `shim-vendor_boot.img` `ad0760cb…` (16,855,040 B), header v4, `dtb_size
+  249100`, `kernel_size 12069`, `ramdisk_size 16594128`. Verified: magic
+  `SWEETXNU`, exact cmdline, embedded ADT == on-disk, and **vs the boot #4
+  payload the only difference is the 17-byte ` ufsrw=1 rootrw=1` extension**
+  (offset 275..291). Built with `/usr/bin/mkbootimg` (Debian `1:34.0.4-1build3`;
+  `gki` stub at `/usr/lib/python3/dist-packages/gki/`).
+- **Hash-mismatch mystery SOLVED (2026-11-17): the ADT embeds a fresh random
+  seed.** `tools/mkadt-manaus.py` does `seed = os.urandom(64)` for
+  `/chosen/random-seed`, so the ADT is 10,376 B and differs between runs
+  **only** in those 64 bytes (offset `0x2a8..0x2e7`) — verified: two fresh
+  generations, and the on-disk `shim/out/manaus.adt`, all differ only there.
+  Therefore the recorded `shim-boot.img`/`shim-vendor_boot.img` hashes from the
+  M6a/M6b builds can **never** be reproduced from the on-disk ADT; the seed is
+  functionally irrelevant (it just seeds XNU's PRNG). It is **not** the
+  mkbootimg version: `vendor_boot` hashes are identical across
+  `/usr/bin/mkbootimg`, the AOSP 12.0/12.1/13.0 scripts in
+  `/home/vicente/.local/bin`, and `pynew`.
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
   `xnu-8796.141.3`, verified locally (the only two that need the HFS staging
   script are 0031 and 0041; with `0026-stage-hfs.sh` staged they apply).
