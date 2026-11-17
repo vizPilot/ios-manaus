@@ -12,20 +12,44 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
 executes `/sbin/launchd`**. Boot #2 panicked on the wrong-platform exec kill
 (`OS_REASON_EXEC`/`EXEC_EXIT_REASON_WRONG_PLATFORM`), fixed by the boot-arg
-`unentitled_ios_sim_launch=1`. **Boot #3 (2026-11-17, `shim-m6b2` on
-`boot_a`+`vendor_boot_a`) cleared that wall** and reached a new one: the boot
-task `mount -a -t nonfs -P 1` exits 1 (the read-only UFS root cannot be upgraded
-to RW) and `POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT` panics the kernel
+`unentitled_ios_sim_launch=1`. Boot #3 reached a second wall: the boot task
+`mount -a -t nonfs -P 1` exits 1 (the read-only UFS root cannot be upgraded to
+RW) and `POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT` panics the kernel
 (`mount[31] exited -- (signal 0, exit status 1)`). **Root-caused from Apple
 source** (Libinfo `_fsi_get_fs`): with no `/etc/fstab`, libinfo *synthesizes* a
 writable `/` entry, so `mount` tries `mount_hfs -o update /`; the fix is to ship
-`/etc/fstab` with a `ro,noauto` root entry. Image `raw-new.img` (fstab added,
-alt-VH fixed for Linux) is built and `fsck.hfsplus` clean, sha256 `57fe6c74…`.
-**The flashable MTK-safe sparse image is ready** (`-fstab-bf.simg`, sha256
-`0dd03312…`; `diag4` OK, no chunk > 4 GiB; expands to `57fe6c74…`). **Next:**
-user-approved `fastboot flash userdata` (phone frozen from boot #3, needs a
-manual Power+VolDown first), then boot #4; expect the next blocker at a
-writable-root need (`/private/var`) unless `rootrw=1` + UFS writes are added.
+`/etc/fstab` with a `ro,noauto` root entry.
+
+**✅ BOOT #4 (2026-11-17): the `/etc/fstab` fix WORKED** — the `mount[31]` panic
+is gone. The new panic is the next `RequireSuccess` boot task,
+**`/usr/libexec/tzinit` (pid 17)**, exiting non-zero because it cannot create
+`/var/db/timezone/*` symlinks on the **read-only** root (EROFS). Proven from the
+pristine IPSW, not OCR (see the M6b section, line ~696):
+- 7-Zip reads the IPSW's APFS root (`087-86698-044.dmg`, 181,683 files); the
+  extracted `/usr/libexec/tzinit` is the **only** early-boot binary containing
+  `create_symlink`/`force_symlink` (strings: `create_symlink: from %s to %s`,
+  `Invalid current symlinks; resetting to system partition`,
+  `Last resort force_system_dataset() failed`, `PROGRAM:tzinit
+  PROJECT:TimeZoneUpdates-81.4`). None of the other boot-task binaries
+  (`fsck`, `mount`, `init_data_protection`, `nvram`, `mobile_obliterator`,
+  `finish_demo_restore`, `FinishRestoreFromBackup`, `cc_fips_test`,
+  `dirs_cleaner`, `launchd_cache_loader`) contain them.
+- launchd's embedded `__TEXT,__config` plist (offset 411885, 8135 B in
+  `/sbin/launchd`) lists **`tzinit` as `RequireSuccess`** → its non-zero exit
+  triggers the initproc panic.
+
+**Next: give the root WRITE access.** The base series already has the code
+(`patches/0030-sweet-ufs-writes.patch`: WRITE(10) `0x2a`, UPIU dir `0x20`,
+read-modify-write for sub-4K, `DKIOCSYNCHRONIZE(CACHE)`, `DKIOCISWRITABLE`,
+`DKIOCGETMAXBLOCKCOUNTWRITE`, `sweet_ufs_write` via physio `B_WRITE`, all
+gated on **`ufsrw=1`**; `patches/0031-sweet-read-write-root.patch` adds
+**`rootrw=1`** to clear `MNT_RDONLY`) — but the manaus override
+`patches-manaus/0028-sweet-ufs-root-device.patch` **replaces** `sweet_ufs.c`
+with a from-scratch MTK polled **read-only** shim (no `writable`, write →
+EROFS, `DKIOCISWRITABLE` → 0), so **writes are NOT active on manaus**. The fix
+is to port the `0030` write logic into the manaus `0028` shim and add
+`ufsrw=1 rootrw=1` to the payload cmdline (the sweet precedent reached
+SpringBoard with exactly those args).
 
 **State:**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
@@ -694,6 +718,43 @@ writable-root need (`/private/var`) unless `rootrw=1` + UFS writes are added.
     `AppExtensions/LaunchDaemons/AppRemovalServices/SystemLibraryTreeState/
     Symlinks/VersionNumber`) contain **no** `mount`/`fsck` job — the boot task
     comes from the embedded `__config` plist upstream notes (NOTES line 802).
+  - **✅ BOOT #4 RESULT (2026-11-17): fstab fix WORKED; next wall = `tzinit`.**
+    `userdata` = `-fstab-bf.simg` (`0dd03312…`), `boot_a`+`vendor_boot_a` =
+    the unchanged M6b boot #3 images. The `mount[31]` panic is gone. The new
+    panic is the **next `RequireSuccess` boot task, `/usr/libexec/tzinit`
+    (pid 17)**, exiting non-zero. Only record: `D:\manaus\20261117_125125.mp4`
+    (HEVC 1920×1080@60, 181 s, handheld/blurry; panic in the last ~2.5 s);
+    clearest frames `D:\manaus\tmp-frames3\f_0004.png`/`f_0027.png`. The panel
+    does not retain console history, so the exact exit status is uncertain from
+    OCR ("3" vs "1") — not material.
+  - **`tzinit` root cause, proven from the pristine IPSW (not guessed):**
+    `7z` reads the APFS root inside the IPSW dmg
+    (`D:\manaus\fw-manaus\iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` →
+    `087-86698-044.dmg`, 4.73 GB uncompressed, 181,683 files). Extracted the
+    early-boot binaries (`_bin/`, `_bin2/`); **`/usr/libexec/tzinit` is the ONLY
+    one containing `create_symlink`/`force_symlink`** (strings
+    `create_symlink: from %s to %s`, `read_symlink: %s`,
+    `/var/db/timezone/zoneinfo`, `/var/db/timezone/localtime`,
+    `Invalid current symlinks; resetting to system partition`,
+    `Bad zoneinfo link %s`, `Last resort force_system_dataset() failed`,
+    `correct_localtime_symlink() failed`, `@(#)PROGRAM:tzinit
+    PROJECT:TimeZoneUpdates-81.4`). None of the other boot-task binaries
+    (`fsck`, `mount`, `init_data_protection`, `nvram`, `mobile_obliterator`,
+    `finish_demo_restore`, `FinishRestoreFromBackup`, `cc_fips_test`,
+    `dirs_cleaner`, `launchd_cache_loader`) contain them.
+    **Mechanism:** `tzinit` creates the `/var/db/timezone/*` symlinks on the
+    **read-only** root → `EROFS` → non-zero exit → `POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT`
+    → initproc panic (same path as the boot #3 `mount[31]` panic).
+  - **`RequireSuccess` boot-task list, from launchd's embedded `__TEXT,__config`
+    plist** (offset 411885, 8135 B in `/sbin/launchd`; `plist` regions at
+    406670/410640/411885/520948): RequireSuccess = `fsck`, `fsck-safe`,
+    `mount-phase-1`/`-2`, `tzinit`, `data-protection`, `recovery-mode`, `fips`,
+    `finish-restore`, `finish-demo-restore`, `finish-obliteration`,
+    `dirs_cleaner`, `restore-datapartition`, `launchd_cache_loader`,
+    `darwinos-boot-task`. AllowCrash = `keybag`, `sysstatuscheck`,
+    `prng_seedctl`, `MSUEarlyBootTask`, `usermanagerd(-switch)`,
+    `auearlyboot`. So many more `RequireSuccess` tasks will fail until the root
+    is writable — a **writable root is required for M6b through userspace**.
   - **Separate landmine (not the current panic):** `get_boot_container()` in
     `edt_fstab/edt_fstab.c` returns NULL **without writing `*os_envp`** when the
     EDT node `IODeviceTree:/filesystems/fstab` is absent (manaus ADT has no
