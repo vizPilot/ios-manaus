@@ -9,14 +9,21 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 `SWEET` is the name of the platform layer, not the device.
 
 **CURRENT (2026-11-17) — M6b, iOS 16.7.16 root on `userdata` (jump to line ~583).**
-The iPhone X HFS+ root is flashed to `userdata` and the kernel **mounts it and
-executes `/sbin/launchd`**. Boot #2 then panicked on the wrong-platform exec kill
+The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
+executes `/sbin/launchd`**. Boot #2 panicked on the wrong-platform exec kill
 (`OS_REASON_EXEC`/`EXEC_EXIT_REASON_WRONG_PLATFORM`), fixed by the boot-arg
-`unentitled_ios_sim_launch=1`. Boot #3 (`shim-m6b2`, full known-good sweet set,
-no read-write args) was flashed to `boot_a`+`vendor_boot_a` on 2026-11-17:
-`shim-boot.img` `3e2ecdaa…`, `shim-vendor_boot.img` `ebd2f2d6…`. **Next:** read
-the XNU console on the panel for `Allowing spawn of iOS binary …` and the next
-blocker (likely `launchd_cache_loader`/AMFI or libignition/preboot).
+`unentitled_ios_sim_launch=1`. **Boot #3 (2026-11-17, `shim-m6b2` on
+`boot_a`+`vendor_boot_a`) cleared that wall** and reached a new one: the boot
+task `mount -a -t nonfs -P 1` exits 1 (the read-only UFS root cannot be upgraded
+to RW) and `POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT` panics the kernel
+(`mount[31] exited -- (signal 0, exit status 1)`). **Root-caused from Apple
+source** (Libinfo `_fsi_get_fs`): with no `/etc/fstab`, libinfo *synthesizes* a
+writable `/` entry, so `mount` tries `mount_hfs -o update /`; the fix is to ship
+`/etc/fstab` with a `ro,noauto` root entry. Image `raw-new.img` (fstab added,
+alt-VH fixed for Linux) is built and `fsck.hfsplus` clean, sha256 `57fe6c74…`.
+**Next:** flash the breakfills `.simg` to `userdata` and boot; expect the next
+blocker at a writable-root need (`/private/var`) unless `rootrw=1` + UFS writes
+are added.
 
 **State:**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
@@ -641,7 +648,91 @@ blocker (likely `launchd_cache_loader`/AMFI or libignition/preboot).
   - **Flash (2026-11-17, user-approved):** `fastboot flash boot_a` +
     `vendor_boot_a` both `OKAY`; `set_active a` ("Slot already set active");
     `reboot`. Watch for the new kernel print `Allowing spawn of iOS binary …`.
-    **Result: pending the panel photo.**
+  - **✅ M6b BOOT #3 RESULT (2026-11-17): the wrong-platform exec kill is GONE**
+    (`unentitled_ios_sim_launch=1` worked; `launchd` spawned processes). **New
+    blocker** — panic `mount[31] exited -- (signal 0, exit status 1)` (photo
+    `D:\manaus\manaus-panic-again.jpg`; the panel does not retain console
+    history, so the preceding `warnx` line is not in the photo). Panic path:
+    the boot task is spawned with `POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT` ->
+    `proc_should_trigger_panic` (`bsd/kern/kern_exit.c:1667`) ->
+    `panic_with_options(..., DEBUGGER_OPTION_INITPROC_PANIC, ...)` (`:1825`);
+    the `%s[%d] exited` + `-- no exit reason available --` text means
+    `p_exit_reason == OS_REASON_NULL` (a plain `exit(1)`).
+  - **Root cause, from Apple source (not guessed).** The boot task is
+    `mount -a -t nonfs -P 1` (upstream NOTES line 802 records the same task from
+    the "embedded `__config` plist", with `RequireSuccess`). With **no
+    `/etc/fstab`**, `_fsi_get_fs()` in
+    `apple-oss-distributions/Libinfo/lookup.subproj/file_module.c` calls
+    `_fsi_fs_root()`, which **synthesizes a `/` entry with `fstypename` from
+    `statfs("/")`, `FSTAB_RW`, passno=1** (`SYNTH_ROOTFS` is not defined for
+    iOS). `mount.c` then runs the entry's `mountfs` (`mount_hfs -o update … /`),
+    which the **read-only manaus UFS shim** refuses (EROFS) -> `mount_hfs` exits
+    1 -> `rval=1` -> `exit(1)` -> initproc panic. (`mount -R 2` = passno 2 is
+    the second phase; `mount.c:351-424`.)
+  - **Fix = ship `/etc/fstab` in the root image** (`/etc` -> `private/etc`).
+    On iOS a present fstab file *suppresses* the synthesized root entry, so the
+    loop sees only our entry; `noauto` makes `mount.c:358` skip it, so both
+    `mount -P 1` and `mount -R 2` exit 0. Exact content (441 B, root:0 gid:0
+    mode 0644):
+    ```
+    # manaus: the kernel mounts the root itself from userdata (rd=ufsroot0).
+    # Without this file libinfo synthesizes a writable "/" entry (FSTAB_RW,
+    # passno=1) and `mount -a -t nonfs -P 1` tries to upgrade the root to
+    # read-write; the read-only UFS shim refuses, mount_hfs exits 1 and the
+    # boot task panics.  `noauto` makes mount skip the entry (mount.c:358),
+    # so both `mount -P 1` and `mount -R 2` exit 0.
+    /dev/ufsroot0 / hfs ro,noauto 0 1
+    ```
+    A non-empty entry is deliberate: `setfsent()`'s implementation was not
+    located (Libinfo `lookup.subproj` has only `_fsi_*`; libc ships only
+    `include/fstab.h`), so the entry guarantees `_fsi_get_fs(SEL_ALL)` returns a
+    non-NULL list even if `setfsent()` is content-sensitive.
+  - **Boot-task provenance:** `/System/Library/LaunchDaemons` (491 plists) and
+    `/System/Library/xpc/launchd.plist` (1.46 MB; keys
+    `AppExtensions/LaunchDaemons/AppRemovalServices/SystemLibraryTreeState/
+    Symlinks/VersionNumber`) contain **no** `mount`/`fsck` job — the boot task
+    comes from the embedded `__config` plist upstream notes (NOTES line 802).
+  - **Separate landmine (not the current panic):** `get_boot_container()` in
+    `edt_fstab/edt_fstab.c` returns NULL **without writing `*os_envp`** when the
+    EDT node `IODeviceTree:/filesystems/fstab` is absent (manaus ADT has no
+    `/filesystems` node; it does have `boot-manifest-hash`, so the earlier
+    "missing data volume" wall is not ours). So `mount`'s local `os_env` is
+    uninitialized; a `mount -R 2` task would `errx` only if that garbage equals
+    `EDT_OS_ENV_MAIN` (1). On sweet it read 0 (`env: 0`), so this is low risk.
+  - **Linux-mount quirk (needed to edit the image; XNU does not care).** The
+    image is 4096 B larger than the HFS+ volume (volume `totalBlocks 4194304` ×
+    4096 = 16 GiB, image 16 GiB + 4096). The on-disk alternate volume header sits
+    at `(totalBlocks-1)*blockSize - 1024` = image `size-5120`; the Linux
+    `fs/hfsplus/wrapper.c: hfsplus_read_wrapper` reads it at
+    `part_size - 2` sectors = **`size-1024`** and requires its signature to equal
+    the primary's -> `hfsplus: invalid secondary volume header` / `unable to find
+    HFS+ superblock`. `Temp\opencode\fix-alt-vh.py` writes a copy of the
+    (journal-bit-cleared) primary VH at `size-1024` and clears `0x2000` at
+    `size-5120`; the image then mounts RW with plain
+    `mount -t hfsplus -o loop`. All three VH locations stay valid after unmount.
+    This affects **both** original images (`-manaus.simg` and `-manaus-fix.simg`
+    both have zeros at `size-1024`).
+  - **Root image edited (step 2, 2026-11-17):** `raw-new.img` (= expansion of the
+    flashed `-manaus-fix.simg`, 17,179,873,280 B) + alt-VH fix + `private/etc/
+    fstab`; unmounted cleanly; **`fsck.hfsplus -f -n`: "The volume iOSRoot
+    appears to be OK."** sha256 `57fe6c749c88eccb52dba1ee21e509fcfc4ebd05c4f9e55a4d17c4353519920d`.
+    The unedited expansion `raw-old.img` (same size) is kept as the
+    `sparsediff` baseline.
+  - **Flashable artifact (step 3):** `Temp\opencode\root-step3b-simg.sh`
+    (`img2simg` -> `breakfills.py` full image + `sparsediff.py` differential).
+    `breakfills.py` was re-created after the temp dir was cleaned and
+    **unit-tested** (`test-breakfills.sh`: 64 MiB mixed image, cap=64 blocks ->
+    382 chunks, byte-identical expansion); `verify-simg.py` re-derives the raw
+    sha256 from a `.simg` without expanding it.
+  - **Host-disk gotcha (cost a failed build, 2026-11-17):** building the ~12 GB
+    sparse image in WSL `$HOME` grows the ext4 vhdx on **C:**; C: had only
+    ~0.4 GiB free, so the write failed with `Read-only file system` and WSL
+    refused to start until `wsl --shutdown`. `wsl --manage --set-sparse true` is
+    blocked (needs `--allow-unsafe`, data-loss warning) so the vhdx was not
+    shrunk. **Build all large intermediates on `/mnt/d`** (D: has ~94 GB) and
+    never write multi-GB files into `$HOME`. The ext4 vhdx is at
+    `%LOCALAPPDATA%\wsl\{cb33febd-…}\ext4.vhdx` (73 GB); the distro could be
+    moved to D: later with `wsl --manage Ubuntu-24.04 --move D:\...`.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
