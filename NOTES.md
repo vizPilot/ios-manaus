@@ -718,12 +718,19 @@ are added.
     appears to be OK."** sha256 `57fe6c749c88eccb52dba1ee21e509fcfc4ebd05c4f9e55a4d17c4353519920d`.
     The unedited expansion `raw-old.img` (same size) is kept as the
     `sparsediff` baseline.
-  - **Flashable artifact (step 3):** `Temp\opencode\root-step3b-simg.sh`
-    (`img2simg` -> `breakfills.py` full image + `sparsediff.py` differential).
-    `breakfills.py` was re-created after the temp dir was cleaned and
-    **unit-tested** (`test-breakfills.sh`: 64 MiB mixed image, cap=64 blocks ->
+  - **Flashable artifact (step 3):** build scripts under `tools/`
+    (`root-step3c-finish.sh`: `img2simg` -> `tools/breakfills.py` full image +
+    `tools/sparsediff.py` differential -> `diag4` -> `tools/verify-simg.py`).
+    `breakfills.py` and `verify-simg.py` now live **in the repo** (they kept
+    being lost when the OS temp dir was cleaned — note: cleaning
+    `%TEMP%\opencode` deletes any helper stored there). `breakfills.py` is
+    unit-tested (`test-breakfills.sh`: 64 MiB mixed image, cap=64 blocks ->
     382 chunks, byte-identical expansion); `verify-simg.py` re-derives the raw
     sha256 from a `.simg` without expanding it.
+  - **Differential image is tiny and confirms the baseline:** `sparsediff`
+    reports **54 of 4,194,305 blocks changed (49 runs)**, 222,376 B — the fstab
+    file, the HFS+ metadata it touches, and the alt-VH fix. So `raw-old.img`
+    matches what the partition actually holds.
   - **Host-disk gotcha (cost a failed build, 2026-11-17):** building the ~12 GB
     sparse image in WSL `$HOME` grows the ext4 vhdx on **C:**; C: had only
     ~0.4 GiB free, so the write failed with `Read-only file system` and WSL
