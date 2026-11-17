@@ -21,9 +21,11 @@ source** (Libinfo `_fsi_get_fs`): with no `/etc/fstab`, libinfo *synthesizes* a
 writable `/` entry, so `mount` tries `mount_hfs -o update /`; the fix is to ship
 `/etc/fstab` with a `ro,noauto` root entry. Image `raw-new.img` (fstab added,
 alt-VH fixed for Linux) is built and `fsck.hfsplus` clean, sha256 `57fe6c74…`.
-**Next:** flash the breakfills `.simg` to `userdata` and boot; expect the next
-blocker at a writable-root need (`/private/var`) unless `rootrw=1` + UFS writes
-are added.
+**The flashable MTK-safe sparse image is ready** (`-fstab-bf.simg`, sha256
+`0dd03312…`; `diag4` OK, no chunk > 4 GiB; expands to `57fe6c74…`). **Next:**
+user-approved `fastboot flash userdata` (phone frozen from boot #3, needs a
+manual Power+VolDown first), then boot #4; expect the next blocker at a
+writable-root need (`/private/var`) unless `rootrw=1` + UFS writes are added.
 
 **State:**
 - Base series `xnu/patches/` (81 patches) applies **cleanly and in order** to
@@ -719,18 +721,43 @@ are added.
     The unedited expansion `raw-old.img` (same size) is kept as the
     `sparsediff` baseline.
   - **Flashable artifact (step 3):** build scripts under `tools/`
-    (`root-step3c-finish.sh`: `img2simg` -> `tools/breakfills.py` full image +
-    `tools/sparsediff.py` differential -> `diag4` -> `tools/verify-simg.py`).
-    `breakfills.py` and `verify-simg.py` now live **in the repo** (they kept
+    (`root-step3c-finish.sh` + `root-step3d-refill.sh`: `img2simg` ->
+    `tools/breakfills.py` full image + `tools/sparsediff.py` differential ->
+    `diag4` -> `tools/verify-simg.py`). `breakfills.py`, `verify-simg.py`,
+    `simg-chunkruns.py` and `fix-alt-vh.py` now live **in the repo** (they kept
     being lost when the OS temp dir was cleaned — note: cleaning
-    `%TEMP%\opencode` deletes any helper stored there). `breakfills.py` is
-    unit-tested (`test-breakfills.sh`: 64 MiB mixed image, cap=64 blocks ->
-    382 chunks, byte-identical expansion); `verify-simg.py` re-derives the raw
-    sha256 from a `.simg` without expanding it.
+    `%TEMP%\opencode` deletes any helper stored there).
+  - **⚠️ breakfills subtlety (found by `diag4`, 2026-11-17):** the first version
+    only split FILL chunks *larger* than the cap, but `img2simg` emits a long run
+    of zero as many *adjacent* `FILL(0)` chunks, and the **host fastboot's
+    libsparse import merges adjacent same-value FILL chunks** before writing, so
+    the wire chunk was still 4.334 GiB (the MTK overflow). `tools/simg-chunkruns.py`
+    (headers only) confirmed the input's largest merged FILL run = **1,136,019
+    blocks = 4.334 GiB over 70 `FILL(0)` chunks**, exactly matching `diag4`'s
+    `max_block_len=4653133824`. **Fix:** `breakfills.py` now *coalesces* adjacent
+    equal-value FILL runs, then rewrites each run of N blocks as
+    `k = N//cap` units of `FILL(cap-1) + RAW(1)` (the RAW holds the fill value)
+    plus `FILL(N%cap)`: no adjacent FILLs remain (so libsparse cannot re-merge),
+    the block count is preserved exactly, and the data is byte-identical.
+    `tools/test-breakfills-coalesce.sh` unit-tests exactly this (hand-built
+    adjacent same-value FILL chunks): output max merged run = 63 blocks
+    (cap-1), `diag4` OK, expansion byte-identical. (A second bug — `flush()`
+    reset `pending_val` but not `pending_blocks`, emitting a `None` fill — was
+    caught by the self-test and fixed.)
+  - **✅ Final flashable image (2026-11-17):**
+    `D:\manaus\ios16-root\ios16-root-20H392-manaus-fstab-bf.simg`,
+    **12,145,759,360 B, sha256 `0dd03312e862a5decc364e31407fed9b97ca8e0aa5bcd3107d245f568d5f3f16`**.
+    `diag4` (libsparse import+resparse): `fragments=47`,
+    **`max_block_len=67,108,864 bytes` (64 MiB), `blocks_over_4GiB=0`,
+    VERDICT OK**; `verify-simg.py` expands it to exactly `raw-new.img`
+    (`57fe6c74…` MATCH). Flash with `tools/flash-userdata-manaus.ps1` (checks
+    size + sha256 before flashing).
   - **Differential image is tiny and confirms the baseline:** `sparsediff`
     reports **54 of 4,194,305 blocks changed (49 runs)**, 222,376 B — the fstab
     file, the HFS+ metadata it touches, and the alt-VH fix. So `raw-old.img`
-    matches what the partition actually holds.
+    matches what the partition actually holds. (Differential flashing is
+    **unproven** on the MTK writer: DONT_CARE support is unverified, so the full
+    image is the primary path.)
   - **Host-disk gotcha (cost a failed build, 2026-11-17):** building the ~12 GB
     sparse image in WSL `$HOME` grows the ext4 vhdx on **C:**; C: had only
     ~0.4 GiB free, so the write failed with `Read-only file system` and WSL
