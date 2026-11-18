@@ -47,15 +47,21 @@ the "noflood" root.** Option B: strip the console-flooding jobs from
 `launchd.plist` (Bluetooth family `bluetoothd`/`bluetoothuserd`/
 `BluetoothUIService`/`BTServer.{avrcp,le,map,pbap}`/`BlueTool` + `fairplayd.H2`;
 530→521 jobs; SpringBoard/backboardd/mediaserverd kept) so the SpringBoard
-`CRASH` text stays visible on the panel. Build script
-`D:\manaus\root-step4-noflood.sh` → `ios16-root-20H392-manaus-noflood-bf.simg`;
-flash `D:\manaus\flash-noflood.ps1`. Capture the crash with a **video of the
-boot from power-on** (captures every line despite the scroll) → extract frames
-with WSL `ffmpeg` → OCR with `%TEMP%\opencode\ocr-frames.ps1`. If the reason is
-still not visible, do option C: a kernel patch to dump the persisted `SWEETLOG`
-tail to the console/panel (the definitive fix for the missing log-read path;
-the manaus USB live-log patches 0072–0077 are Qualcomm-only, and
-`fastboot boot`/`fetch` + OrangeFox+adb are unavailable).
+`CRASH` text stays visible on the panel. **✅ IMAGE BUILT (2026-11-17 23:04):**
+`D:\manaus\ios16-root\ios16-root-20H392-manaus-noflood-bf.simg`,
+**12,145,771,676 B, sha256
+`3d9fde991f5e95af0973ef42b83cffde7690108a2b92118400c1c18041873869`**; `diag4`
+47 fragments / max 64 MiB / `blocks_over_4GiB=0` VERDICT OK; `verify-simg` MATCH
+(expands to `raw.img` sha256 `ef8806e3cb3cc129b20a13a75981bb61e3ea71c98963c1001968ecaee0d89206`).
+Scripts `D:\manaus\root-step4-noflood.sh` + `D:\manaus\flash-noflood.ps1`
+(copies in `tools/`). Flash `userdata` only (`boot_a`/`vendor_boot_a` stay on
+boot #5/#6 images). Capture the crash with a **video of the boot from power-on**
+(captures every line despite the scroll) → extract frames with WSL `ffmpeg` →
+OCR with `%TEMP%\opencode\ocr-frames.ps1`. If the reason is still not visible, do
+option C: a kernel patch to dump the persisted `SWEETLOG` tail to the
+console/panel (the definitive fix for the missing log-read path; the manaus USB
+live-log patches 0072–0077 are Qualcomm-only, and `fastboot boot`/`fetch` +
+OrangeFox+adb are unavailable).
 
 **✅ BOOT #4 (2026-11-17): the `/etc/fstab` fix WORKED** — the `mount[31]` panic
 is gone. The new panic is the next `RequireSuccess` boot task,
@@ -961,7 +967,10 @@ SpringBoard fixes 0064/0068/0070 + `BKNoWatchdogs` are already in this kernel).
 **Plan (option B, user flashes tomorrow):** strip the flooders from
 `launchd.plist` (Bluetooth family + `fairplayd.H2`; 530→521 jobs) so the crash
 text stays on the panel — build `D:\manaus\root-step4-noflood.sh` →
-`ios16-root-20H392-manaus-noflood-bf.simg`, flash `D:\manaus\flash-noflood.ps1`,
+`ios16-root-20H392-manaus-noflood-bf.simg` (**built 2026-11-17 23:04:
+12,145,771,676 B, sha256
+`3d9fde991f5e95af0973ef42b83cffde7690108a2b92118400c1c18041873869`; diag4 OK /
+verify-simg MATCH**), flash `D:\manaus\flash-noflood.ps1`,
 then capture the boot with a **video from power-on** (every console line is
 captured despite scrolling) → `ffmpeg` frames → `%TEMP%\opencode\ocr-frames.ps1`.
 Fallback if still hidden: option C, a kernel patch that dumps the persisted
