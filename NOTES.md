@@ -8,7 +8,14 @@ Fork: `https://github.com/vizPilot/ios-manaus`, branch **`manaus`**
 (`origin` = fork, `upstream` = dipa-studio/ios-sweet). No `sweet_*` renames:
 `SWEET` is the name of the platform layer, not the device.
 
-**CURRENT (2026-11-17) — M6b, iOS 16.7.16 root on `userdata` (jump to line ~583).**
+**CURRENT (2026-11-18) — M6c ✅: iOS 16.7.16 reaches a STABLE SPRINGBOARD LOCK
+SCREEN on manaus (boot #8; jump to line ~72).** The blocker was NOT the asset
+catalog: the flashed ADT had **no `/product` node**, so MobileGestalt's
+`ArtworkTraits` were empty and CoreUI's bounding-path lookup returned nil. Fixed
+by rebuilding `boot_a`/`vendor_boot_a` with the real iPhone X `/product` node.
+`userdata` (the noflood root) is unchanged from boot #7.
+
+**M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
 executes `/sbin/launchd`**. Boot #2 panicked on the wrong-platform exec kill
 (`OS_REASON_EXEC`/`EXEC_EXIT_REASON_WRONG_PLATFORM`), fixed by the boot-arg
@@ -62,6 +69,96 @@ option C: a kernel patch to dump the persisted `SWEETLOG` tail to the
 console/panel (the definitive fix for the missing log-read path; the manaus USB
 live-log patches 0072–0077 are Qualcomm-only, and `fastboot boot`/`fetch` +
 OrangeFox+adb are unavailable).
+
+**🔄 BOOT #7 FLASHED (2026-11-18 ~morning): noflood root is on `userdata`.**
+`D:\manaus\flash-noflood.ps1` → 47/47 `OKAY`, exit 0, **9m04s** (sha256
+re-verified before writing: `3d9fde99…`). `fastboot reboot` issued → boot #7
+running. `boot_a`/`vendor_boot_a` unchanged (still the M6b boot #5/#6 images;
+`current-slot=a`, `product=manaus`).
+
+**✅ BOOT #8 (2026-11-18): SPRINGBOARD REACHES A STABLE iOS LOCK SCREEN. The
+SpringBoard abort was NOT an asset-catalog problem — the flashed ADT had no
+`/product` node.** Boot #7's OCR gave `Failed to load bounding path bitmap data
+from the asset manager for asset name: BoundingPathBitmap-1125x2436-375x812-3.00x`
+→ SpringBoard `NSInternalInconsistencyException`. Prior art
+(`PixOS-Project/pixelios-kernel/docs/research/37-springboard-boundingpath-abort.md`,
+iOS 16.7 on Pixel) hit the **exact same abort** and root-caused it: CoreUI's
+`_dataWithName:` keys on MobileGestalt `ArtworkTraits`, which are read from
+`IODeviceTree:/product` (`product-description`, `artwork-device-idiom`,
+`artwork-device-subtype`, `artwork-scale-factor`, `artwork-dynamic-displaymode`,
+`device-perf-memory-class`, `graphics-featureset-class`,
+`graphics-featureset-fallbacks`, `compatible-device-fallback`). With no
+`/product` they are empty/defaults → the lookup returns nil → the abort. The
+CSI-vs-`.data` rendition split is explicitly **not** a cause (real iPhone X
+hardware reads the same CSI renditions).
+- **Confirmed on manaus:** the ADT inside the flashed boot #7 `payload.bin` had
+  none of those properties. `tools/mkadt-manaus.py`'s `d22ap_product()` prints
+  `warning: … missing, no /product node` and returns None when
+  `research/ipsw-x/d22ap.adt` is absent — it was absent at build time (WSL reset
+  had wiped it), so every manaus ADT since has silently had no `/product`.
+- **Fix (no root change, no kernel rebuild):** extract the real iPhone X
+  `/product` node and rebuild the boot images.
+  - `Firmware\all_flash\DeviceTree.d22ap.im4p` (33,719 B) from the iPhone X
+    IPSW; IM4P payload is LZFSE (`bvx2`) → decompressed to
+    `research/ipsw-x/d22ap.adt` (**186,084 B, sha256
+    `9e670987c80493bd69aba7be62e3179c04663324d9249b0973675baac175dbf1`**, 22
+    props / 18 children incl. `product`). Extraction script
+    `D:\manaus\extract-d22ap.py` (Windows `lzfse` pip module; WSL
+    `/usr/bin/lzfse` from apt also works); verifier `D:\manaus\verify-d22ap.py`.
+    The `d22ap.adt` is gitignored (Apple artifact).
+  - `py tools/mkadt-manaus.py D:\manaus\shim-m6b5p\manaus.adt` → ADT grows
+    **10,376 → 13,060 B, sha256
+    `5587666ff5aa415b135ea12539e04f5b9fd8ffbea332a64d17b4d775414dd912`**, now
+    with the `/product` node (`artwork-device-idiom=phone`,
+    `artwork-device-subtype=0x984`, `artwork-scale-factor=3`,
+    `device-perf-memory-class=4`, `graphics-featureset-class=APPLE4`,
+    `graphics-featureset-fallbacks=APPLE3:APPLE3v1:APPLE2:APPLE1:GLES2,0`,
+    `artwork-display-gamut=P3`, `product-description=iPhone X`,
+    `compatible-device-fallback=iPhone9,2`).
+  - `py tools/mkpayload.py D:\manaus\ci-kernel\kernel.development.sweet
+    D:\manaus\shim-m6b5p\manaus.adt D:\manaus\shim-m6b5p\payload.bin --cmdline
+    "<boot #7 cmdline>"` → **16,596,816 B** (kernel `0283059c…` unchanged;
+    cmdline byte-identical to boot #7, 220 B).
+  - `tools/mkbootimg-manaus.sh` (`--mode v4`, shim `shim/out/Image`, stock
+    249,100 B DTB blob `shim/out/first-boot/check/vendor/dtb`) →
+    **`shim-boot.img` 16,613,376 B sha256
+    `e74851d04f397618474520202bbd966b1bccceccaabd2982ab560fe6c9ad4854`** and
+    **`shim-vendor_boot.img` 16,855,040 B sha256
+    `edafc7b33e74c2b2ca9c977e36cc8b0902eae2a9867ee30ad9ce8ce6edc1ed6c`**
+    (`dtb_size 249100`, `dtb_addr 0x47c80000`, `signature_size 0`). Verified
+    both embed the new ADT (`5587666f…`) and the boot #7 cmdline
+    (`D:\manaus\verify-m6b5p.py`).
+  - WSL `mkbootimg` needed the `gki` stub re-created (the reset removed it):
+    `D:\manaus\wsl-mkgki-stub.sh` writes
+    `/usr/lib/python3/dist-packages/gki/generate_gki_certificate.py`.
+- **Flash (approved):** `fastboot flash boot_a` + `flash vendor_boot_a`
+  (16,224 / 16,460 KB, both `OKAY` ~0.6 s), `--set-active=a` OK,
+  `current-slot=a`. Log `D:\manaus\flash-m6b5p.log`, script
+  `D:\manaus\flash-m6b5p.ps1`.
+- **Result:** shim console → Apple logo → **stable iOS lock screen (clock/date)**.
+  No panic, no crash text, no respawn flood. The bounding-path abort is gone.
+  `adb`/`fastboot` are both absent during the run (as expected on the iOS path).
+  - **Observation (user, 2026-11-18): the lock screen has NO wallpaper** (black
+    background). Not yet investigated — could be a missing/default wallpaper
+    asset, the wallpaper daemon (`backboardd`/`WallpaperKit`), or just the
+    fresh-install default. Separate from the (now-fixed) bounding-path abort.
+- **Still open:** interact with SpringBoard (swipe/unlock) to confirm the rest of
+  the UI; the earlier `dlopen(/System/Library/Frameworks/ManagedConfiguration…,
+  0x0101): tried: …` failure is benign (the framework lives in
+  `PrivateFrameworks`).
+
+**⚠️ BUILD-ENV LOST (2026-11-18): the user reset the `Ubuntu-24.04` WSL distro**
+(C: was nearly full). The distro still exists but is bare: **no
+`/home/vicente/libsparse` (`img2simg`/`simg2img`/`diag4`), no `ffmpeg`, no
+`gh`**; `/mnt/d` and all built artifacts are intact (they live on D:). So
+`userdata` flashing (Windows `fastboot.exe`) and the panel OCR
+(`%TEMP%\opencode\*.ps1`, Windows.Media.Ocr) still work, but **rebuilding a root
+image or re-running `breakfills`/`verify-simg` needs the WSL env re-created**
+(`apt install python3 ffmpeg` + rebuild libsparse; the WSL2 host kernel already
+has HFS+). `ffmpeg` was reinstalled on **Windows** via
+`winget install Gyan.FFmpeg` (v9.0.2, shim at
+`%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe`) for video frame extraction
+(`D:\manaus\boot-video-ocr.ps1`). C: free ≈ 69 GB, D: free ≈ 59 GB.
 
 **✅ BOOT #4 (2026-11-17): the `/etc/fstab` fix WORKED** — the `mount[31]` panic
 is gone. The new panic is the next `RequireSuccess` boot task,
