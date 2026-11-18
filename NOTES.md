@@ -22,15 +22,40 @@ writable `/` entry, so `mount` tries `mount_hfs -o update /`; the fix is to ship
 
 **✅ BOOT #5 (2026-11-17): the read-write cmdline worked.** With `ufsrw=1
 rootrw=1` the `tzinit` panic is gone and the phone reached the iOS **userspace
-boot UI (Apple logo + progress bar)** — the furthest yet. The bar then stalled
-with console text = the **known-benign** `bluetoothd`/`fairplayd.H2` respawn
-loop. Root cause found: the manaus root image was a **raw `mkiosroot.sh` output
-+ only `/etc/fstab`** — it never had `tools/sweet-root-tweaks.py` applied, so it
-lacks the data-migration skip (the bar *is* the ~60 min `cpus=1` migration), the
-`/private/var/containers` dirs, the launchd `_PanicOnCrash`/CommCenter fixes,
-the Setup skip, `BKNoWatchdogs`, the audio/MediaToolbox fixes and the activation
-data ark. Fix = apply that recipe and reflash `userdata` only (see the M6b
-section, line ~860). **Next: BOOT #6** with the tweaked image.
+boot UI (Apple logo + progress bar)** — the furthest yet. Root cause of the
+stall: the manaus root image was a **raw `mkiosroot.sh` output + only
+`/etc/fstab`** — it never had `tools/sweet-root-tweaks.py` applied (no
+data-migration skip → the bar *was* the ~60 min `cpus=1` migration, no
+`/private/var/containers`, no launchd `_PanicOnCrash`/CommCenter fix, no Setup
+skip, no `BKNoWatchdogs`, no audio/MediaToolbox fix, no activation ark). Fix =
+apply that recipe and reflash `userdata` only.
+
+**⚠️ BOOT #6 (2026-11-17, tweaked image): reached SpringBoard, which then
+CRASHED.** `userdata` = `ios16-root-20H392-manaus-tweaks-bf.simg` (12,145,771,676
+B, sha256 `2d35601cb701766fcca8b9846246ddd93f408d406b6b4b8d38837935bd911d1e`);
+flash 47/47 `OKAY`, 8m32s. The panel showed the **Apple logo with NO progress
+bar, slowly** — i.e. SpringBoard was reached and then died. Because
+`sweet-root-tweaks.py` renames `_PanicOnCrash`→`_PanicOnCrasX`, a SpringBoard
+crash no longer panics the kernel, so there is no automatic reset and no
+`CRASH` block on the panel: the console is buried by the **benign**
+`bluetoothd`/`fairplayd.H2` respawn spam. **The manaus-specific SpringBoard
+crash reason is still UNKNOWN** (the sweet-side SpringBoard fixes 0064/0068/0070
++ `BKNoWatchdogs` are already in this kernel, so this is likely manaus-specific).
+
+**NEXT (plan agreed 2026-11-17 evening; user will flash tomorrow): BOOT #7 with
+the "noflood" root.** Option B: strip the console-flooding jobs from
+`launchd.plist` (Bluetooth family `bluetoothd`/`bluetoothuserd`/
+`BluetoothUIService`/`BTServer.{avrcp,le,map,pbap}`/`BlueTool` + `fairplayd.H2`;
+530→521 jobs; SpringBoard/backboardd/mediaserverd kept) so the SpringBoard
+`CRASH` text stays visible on the panel. Build script
+`D:\manaus\root-step4-noflood.sh` → `ios16-root-20H392-manaus-noflood-bf.simg`;
+flash `D:\manaus\flash-noflood.ps1`. Capture the crash with a **video of the
+boot from power-on** (captures every line despite the scroll) → extract frames
+with WSL `ffmpeg` → OCR with `%TEMP%\opencode\ocr-frames.ps1`. If the reason is
+still not visible, do option C: a kernel patch to dump the persisted `SWEETLOG`
+tail to the console/panel (the definitive fix for the missing log-read path;
+the manaus USB live-log patches 0072–0077 are Qualcomm-only, and
+`fastboot boot`/`fetch` + OrangeFox+adb are unavailable).
 
 **✅ BOOT #4 (2026-11-17): the `/etc/fstab` fix WORKED** — the `mount[31]` panic
 is gone. The new panic is the next `RequireSuccess` boot task,
@@ -925,6 +950,22 @@ stay on the boot #5 images (the `ufsrw=1 rootrw=1` cmdline is correct); only
 `userdata` is re-flashed (`D:\manaus\flash-tweaks.ps1`). **✅ FLASH DONE
 (2026-11-17): 47/47 fragments `OKAY`, exit 0, 8m32s** (image sha verified before
 writing); `fastboot reboot` issued → **BOOT #6 running.**
+
+**BOOT #6 result (2026-11-17 late): SpringBoard was reached, then CRASHED.**
+The panel showed the Apple logo with **no progress bar**, slowly (the migration
+screen of boot #5 was gone — the tweaks worked). A SpringBoard crash no longer
+panics the kernel (`_PanicOnCrasX`), so there is no auto-reset and the `CRASH`
+block is scrolled off by the benign `bluetoothd`/`fairplayd.H2` respawn loop;
+the crash reason is **still unknown** (and likely manaus-specific: sweet's own
+SpringBoard fixes 0064/0068/0070 + `BKNoWatchdogs` are already in this kernel).
+**Plan (option B, user flashes tomorrow):** strip the flooders from
+`launchd.plist` (Bluetooth family + `fairplayd.H2`; 530→521 jobs) so the crash
+text stays on the panel — build `D:\manaus\root-step4-noflood.sh` →
+`ios16-root-20H392-manaus-noflood-bf.simg`, flash `D:\manaus\flash-noflood.ps1`,
+then capture the boot with a **video from power-on** (every console line is
+captured despite scrolling) → `ffmpeg` frames → `%TEMP%\opencode\ocr-frames.ps1`.
+Fallback if still hidden: option C, a kernel patch that dumps the persisted
+`SWEETLOG` tail to the console/panel.
 
 **Never** flash `vbmeta`, `lk`, `preloader`, `boot_b` or `vendor_boot_b`
 without a verified backup. The 2026-11-09 exception allows the shim on
