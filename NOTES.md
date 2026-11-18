@@ -15,6 +15,18 @@ catalog: the flashed ADT had **no `/product` node**, so MobileGestalt's
 by rebuilding `boot_a`/`vendor_boot_a` with the real iPhone X `/product` node.
 `userdata` (the noflood root) is unchanged from boot #7.
 
+**⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
+user is replacing the screen before continuing.** Boot #8 is built, flashed,
+verified and committed (`966027b` on `origin/manaus`). Nothing is left
+half-done; resume by re-flashing/rebooting the current images and observing the
+lock screen again. On-device state at pause: `boot_a`/`vendor_boot_a` =
+`D:\manaus\shim-m6b5p\shim-boot.img` (`e74851d0…`) +
+`shim-vendor_boot.img` (`edafc7b3…`); `userdata` = the noflood root
+(`3d9fde99…`); `current-slot=a`, `product=manaus`. Known non-blocking issue:
+lock screen has **no wallpaper** (assets exist under
+`/Library/Wallpaper/Collections/`; likely no preference written because Setup was
+skipped) — cosmetic, not the bounding-path crash.
+
 **M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
 executes `/sbin/launchd`**. Boot #2 panicked on the wrong-platform exec kill
