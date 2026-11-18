@@ -27,6 +27,34 @@ lock screen has **no wallpaper** (assets exist under
 `/Library/Wallpaper/Collections/`; likely no preference written because Setup was
 skipped) — cosmetic, not the bounding-path crash.
 
+**🔧 BOOT ACCELERATION (2026-11-18) — all cmdline-only, no kernel rebuild.**
+Boot #8 runs `cpus=1` (single core) and the boot is CPU-bound: on sweet the same
+`cpus=1` made the data migration take ~60 min, input latency ~1 min, and the
+per-swap full-frame panel copy starved everything. Levers:
+1. **`cpus=6`** (the six A55 cores; exactly the config sweet ran to its home
+   screen) or **`cpus=8`** (+2 A76). `cpus=N` selects the first N of the 8 ADT
+   CPUs (`SweetCPU::startAll`, patch 0065); patch 0078 raised
+   `SWEET_SMP_MAX_CPUS` to 8. The shim already proved PSCI `CPU_ON` for **all 7
+   secondaries** on manaus (NOTES ~L1470), so secondaries are known to start.
+2. **`ufscache=1 ufswait=1`** (patch 0069, never enabled on manaus): directional
+   cache maintenance instead of full `dma_sync`, and sleep-instead-of-spin while
+   a UFS command is in flight (frees the other CPUs). Both were left "optional,
+   not yet applied" on sweet, so treat as unproven and test on top of `cpus=6`.
+3. `-noprogress`/`sweetfb_noconsole=1` only affect console readability/drawing,
+   not boot time materially; left alone so the panel stays diagnostic.
+- **Prepared + verified images, patched in place from the proven boot #8 images**
+  with the new **`tools/bootimg-cmdline.py`** (only the cmdline token changes;
+  ADT `5587666f…` and everything else byte-identical, size unchanged):
+  - `D:\manaus\fast-cpus6\`  boot `8cf23db2…` / vendor_boot `f735ff65…`
+  - `D:\manaus\fast-cpus8\`  boot `1d3c2049…` / vendor_boot `98b72626…`
+  - `D:\manaus\fast-cpus6-ufs\` boot `49034e01…` / vendor_boot `526d9647…`
+- **⚠️ STALE, DO NOT FLASH:** `D:\manaus\shim-cpus2|cpus6|log0\` were built
+  2026-11-17 **before** the `/product` fix; their ADT is the old 10,376 B one
+  **with no `/product`** → flashing them would re-break boot #8.
+- **Boot #9 = `cpus=6`** flashed 2026-11-18 18:10 (boot_a+vendor_boot_a both
+  `OKAY`; script `D:\manaus\flash-cpus.ps1`, log `flash-fast-cpus6.log`),
+  rebooted 18:10:09. Result: _pending user observation_.
+
 **M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
 executes `/sbin/launchd`**. Boot #2 panicked on the wrong-platform exec kill
