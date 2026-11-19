@@ -90,8 +90,20 @@ MMIO path that panicked in boot M6a.
   the vendor image still contains the exact stock DTB blob (249,100 B, SHA256
   `fec0c66d…`) at the expected offset. `D:\manaus\build-keys.ps1` was corrected
   too.
-- **Not done yet:** flash the corrected `keys2` images to slot `a`, boot, and
-  test the buttons at the lock screen. Do **not** flash `D:\manaus\fast\` with
+- **✅ BOOT #16 (2026-11-19 ~12:43, `keys2`): MTK key driver works on hardware.**
+  The corrected images were flashed to slot `a` and booted. The phone reached
+  the iOS lock screen in **~2 min** (the user observed; slower than boot #15's
+  ~1m30 but no panic/freeze). **Observed button behaviour with `manausmap=0`:**
+  physical `Vol+` raises the volume HUD, physical `Vol-` lowers it, **but the
+  physical Power button also raises the volume HUD** (does not sleep/wake).
+  So the HID chain and the KPD/PMIC polling are alive; only the source→key
+  assignment needs one more boot-arg variant. `manausmap=2` swaps the two PMIC
+  bits (`pwr=raw_up`, `up=raw_pwr`) and is the next thing to try; no kernel
+  rebuild is needed. If that still gives the wrong result, a `sweetdump=1`
+  image built from the **same corrected kernel** can print the persisted
+  SWEETLOG with the `MANAUS KEYS: key=N down=…` lines after pressing buttons.
+- **Not done yet:** correct the Power/Vol+ assignment, then re-test all three
+  buttons at the lock screen. Do **not** flash `D:\manaus\fast\` with
   `sweetkeys=1` — it still has the old Qualcomm key driver (M6a panic path).
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
