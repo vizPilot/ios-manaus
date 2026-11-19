@@ -20,10 +20,13 @@ the UFS link gear, not CPU. The shim raises the link from PWM to HS by default
 (`ufs_raise_gear()`, `5baf8aa`); boot #15 (`fast`, no token) reached the lock
 screen in **≈1.5 min** (was 34m52s). See the acceleration section below.
 
-**🔧 INPUT (2026-11-19): volume/power buttons — implementation ready, NOT yet
-built or flashed.** Goal: make the side buttons drive `sweet_hid_key()` on
-manaus without touching any `sweet_*` symbol or reusing the Qualcomm SPMI/PON
-MMIO path that panicked in boot M6a.
+**✅ INPUT (2026-11-19) — DONE on hardware: all three side buttons work.**
+Boot #17 with `manausmap=2` reached the lock screen and the user confirmed
+Power sleeps/wakes, Vol+ raises and Vol- lowers the volume HUD. No kernel
+rebuild was needed for the final mapping; images live in `D:\manaus\keys3\`.
+Goal had been to make the side buttons drive `sweet_hid_key()` on manaus
+without touching any `sweet_*` symbol or reusing the Qualcomm SPMI/PON MMIO
+path that panicked in boot M6a.
 
 - **Observed from the stock DTB** (`D:\manaus\manaus-stock.dts`): two key
   sources exist. `/spmi@1c804000/pmic@4/mt6363keys` is `mediatek,mt6363-keys`
@@ -97,14 +100,22 @@ MMIO path that panicked in boot M6a.
   physical `Vol+` raises the volume HUD, physical `Vol-` lowers it, **but the
   physical Power button also raises the volume HUD** (does not sleep/wake).
   So the HID chain and the KPD/PMIC polling are alive; only the source→key
-  assignment needs one more boot-arg variant. `manausmap=2` swaps the two PMIC
-  bits (`pwr=raw_up`, `up=raw_pwr`) and is the next thing to try; no kernel
-  rebuild is needed. If that still gives the wrong result, a `sweetdump=1`
-  image built from the **same corrected kernel** can print the persisted
-  SWEETLOG with the `MANAUS KEYS: key=N down=…` lines after pressing buttons.
-- **Not done yet:** correct the Power/Vol+ assignment, then re-test all three
-  buttons at the lock screen. Do **not** flash `D:\manaus\fast\` with
-  `sweetkeys=1` — it still has the old Qualcomm key driver (M6a panic path).
+  assignment needed one more boot-arg variant. `sweetdump=1` was NOT needed.
+- **✅ BOOT #17 (2026-11-19 ~13:00, `keys3`): ALL THREE BUTTONS CORRECT.**
+  Only the boot cmdline changed from `keys2`: `manausmap=2` instead of `0`
+  (PMIC TOPSTATUS bit1 → power, bit0 → volume up, KPD bit0 → volume down).
+  Images flashed to slot `a`: `D:\manaus\keys3\shim-boot.img` SHA256
+  `ed18bc17a3cf3d3d7053d38cfc0b2d9a7cc3bfdcf35606796d4d7775c6560a23`,
+  `shim-vendor_boot.img` SHA256
+  `5cbbe4da0db656dc9b06f7e13182c9d31b67ed57867403ee724935d5cbb35bb9`.
+  `verify-bootimg-adt.py`: ADT + `/product` intact, exact stock DTB intact.
+  User observation: reached lock screen; **Power sleeps/wakes, Vol+ raises
+  volume, Vol- lowers volume**. `D:\manaus\build-keys.ps1` updated to use
+  `manausmap=2`. `sweettouch=0 sweetusb=0` unchanged; touch is still broken.
+- **Not done yet:** nothing for the buttons. Do **not** flash
+  `D:\manaus\fast\` with `sweetkeys=1` — it still has the old Qualcomm key
+  driver (M6a panic path). If a future kernel rebuild happens, the manaus
+  `0060` override must stay in `xnu/patches-manaus/`.
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
