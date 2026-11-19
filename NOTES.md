@@ -106,6 +106,21 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
 - **Boot log:** #8 `cpus=1` >35 min; #9 `cpus=6` **34m52s**; #10 `cpus=6
   ufscache=1 ufswait=1` >35 min (no lock screen in the observed window);
   #11 `cpus=6 -noprogress sweetfb_hz=1 sweetlog=0` started 21:04:33, _pending_.
+- **▶️ NEXT (when the screen is back):** flash **`sweetdump-hs`** first (fast, no
+  35-min wait): its panel shows whether `ufs_raise_gear()` reached HS
+  (`UFS HSNOW mode=0x11` = FAST) and the SWEETLOG header. Then flash **`fast-hs`**
+  and time the boot. Notes:
+  - **`sweetlog=0` in boot #11 means that boot wrote no log**, so the dump
+    currently shows **boot #10's** log (a partial boot). Its `total` is still a
+    valid lower bound; a re-dump after a `fast-hs` boot gives a full-boot number.
+  - XNU cannot undo the raise: `ufs_take_over_host()` (patch 0028) only *checks*
+    `HCE`/`HCS.DP`/`HCS.UTRLRDY` and reuses the host; it never re-negotiates.
+  - If `total` turns out huge (console-bound), the contingency is to mute the
+    kernel console early: `sweet_log_append()` (patch 0047) already runs *before*
+    the `disableConsoleOutput` check, so a mute keeps the log. `sweet_console_muted`
+    (patch 0067) only fires at the first GUI swap; an early set from a boot-arg
+    (e.g. `sweetmute=1` parsed in `sweet_ufs.c`, next to `sweet_log_start()`)
+    would cover the kernel phase. That needs a CI kernel rebuild — not built yet.
 
 **M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
