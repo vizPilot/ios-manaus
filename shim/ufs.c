@@ -833,8 +833,19 @@ static uint32_t device_init(void)
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
-	uint32_t ocs, st;
-	return scsi(UFS_LUN, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+	uint32_t ocs = 0, st = 0, rc = 0;
+	/*
+	 * The first SCSI command after bring-up (or after a UniPro power-mode
+	 * change) normally returns CHECK CONDITION carrying a unit attention
+	 * (ASC 0x29, POWER ON/RESET). The UA is cleared once reported, so a
+	 * retry succeeds; without it the very first read fails.
+	 */
+	for (int i = 0; i < 3; i++) {
+		rc = scsi(UFS_LUN, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+		if (!rc)
+			break;
+	}
+	return rc;
 }
 
 static uint64_t le64(const uint8_t *p)
@@ -1044,14 +1055,22 @@ void ufs_link_info(uint32_t *tx, uint32_t *rx, uint32_t *mode, uint32_t *lanes)
  * Returns 0 on success (the link is HS), 1 otherwise; the caller must not
  * assume the link survived. Safe to call only with the link already up.
  */
+/* Outcome of the last ufs_raise_gear(), for the panel diagnostic dump. */
+static uint32_t hs_rc = ~0u, hs_devinit = ~0u, hs_tur = ~0u;
+static uint32_t hs_before = ~0u, hs_after = ~0u;
+
 int ufs_raise_gear(void)
 {
 	uint32_t a2 = 0;
 	uint32_t h_rx = 0, p_rx = 0, lane_rx = 0, lane_tx = 0;
 	uint32_t gear_rx, gear_tx, lanes;
 
+	hs_rc = hs_devinit = hs_tur = ~0u;
+	hs_before = hs_after = ~0u;
+
 	uint32_t b_tx = 0, b_rx = 0, b_mode = 0, b_lanes = 0;
 	ufs_link_info(&b_tx, &b_rx, &b_mode, &b_lanes);
+	hs_before = b_mode;
 	ufs_log2("UFS HSWAS", "tx=", b_tx, "rx=", b_rx);
 	ufs_log2("UFS HSWAS", "mode=", b_mode, "lanes=", b_lanes);
 
@@ -1102,10 +1121,31 @@ int ufs_raise_gear(void)
 	dme_set(ATTR_DME_LOCAL_AFC0_REQ_TIMEOUT, DL_AFC0_REQ_TIMEOUT, &a2);
 
 	uint32_t rc = dme_pwr_mode((PA_FAST_MODE << 4) | PA_FAST_MODE, &a2);
+	hs_rc = rc;
 	ufs_log2("UFS HSPMC", "rc=", rc, "arg2=", a2);
+
+	/*
+	 * A UniPro power-mode change re-initializes the link and the device
+	 * raises a unit attention (ASC 0x29, POWER ON/RESET). Linux performs
+	 * the power change *before* fDeviceInit; the shim already ran that
+	 * handshake, so redo it here and consume the UA before XNU takes over
+	 * (XNU's driver never re-inits the device, it only retries one TUR).
+	 */
+	hs_devinit = device_init();
+	ufs_log2("UFS HSDEV", "rc=", hs_devinit, "hcs=", ufs_rd(REG_HCS));
+
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	for (int i = 0; i < 3; i++) {
+		hs_tur = scsi(UFS_LUN, tur, sizeof(tur), 0, 0, &ocs, &st);
+		if (!hs_tur)
+			break;
+	}
+	ufs_log2("UFS HSTUR", "rc=", hs_tur, "ocs/st=", (uint64_t)ocs << 8 | st);
 
 	uint32_t a_tx = 0, a_rx = 0, a_mode = 0, a_lanes = 0;
 	ufs_link_info(&a_tx, &a_rx, &a_mode, &a_lanes);
+	hs_after = a_mode;
 	ufs_log2("UFS HSNOW", "tx=", a_tx, "rx=", a_rx);
 	ufs_log2("UFS HSNOW", "mode=", a_mode, "lanes=", a_lanes);
 	ufs_log2("UFS HSNOW", "hcs=", ufs_rd(REG_HCS), "probe=", probe_state());
@@ -1234,6 +1274,11 @@ void sweetlog_dump(void)
 	ufs_link_info(&tx, &rx, &mode, &lanes);
 	con_hex2("UFS GEAR", "tx=", tx, "rx=", rx);
 	con_hex2("UFS PWR", "mode=", mode, "lanes=", lanes);
+	/* If this boot ran ufs_raise_gear(), show how it went. */
+	if (hs_rc != ~0u) {
+		con_hex2("UFS HS pwr", "rc=", hs_rc, "devinit=", hs_devinit);
+		con_hex2("UFS HS tur", "rc=", hs_tur, "was=", hs_before);
+	}
 
 	if (read_blocks(0, 2, data)) {
 		con_str("SWEETLOG", "GPT read error");
