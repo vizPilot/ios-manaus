@@ -1052,7 +1052,8 @@ void test_ufs(void)
  */
 #define SWEET_LOG_SIZE		(4u << 20)
 #define SWEET_LOG_BLOCKS	(1 + SWEET_LOG_SIZE / BLOCK)
-#define SWEET_LOG_KEEP		20
+/* The dump clears the panel first, so most of its ~49 rows are free. */
+#define SWEET_LOG_KEEP		40
 
 struct sweet_log_header {
 	char magic[8];
