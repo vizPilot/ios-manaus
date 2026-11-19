@@ -9,3 +9,9 @@
 int ufs_bringup(void);
 /* Milestone 5 probe: the same bring-up, then TUR/CAP/READ and a GPT dump. */
 void test_ufs(void);
+/*
+ * Diagnostic: read the persistent console log (xnu patch 0047) the previous
+ * boot left in the last blocks of `userdata` and print its header and tail to
+ * the panel. Read-only. Call after ufs_bringup().
+ */
+void sweetlog_dump(void);

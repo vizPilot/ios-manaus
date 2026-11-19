@@ -143,6 +143,30 @@ const char *loader_boot(uintptr_t dtb)
 	}
 
 	/*
+	 * Diagnostic boot ("sweetdump" in the cmdline): bring the UFS link up,
+	 * print the persistent console log a previous boot left in `userdata`
+	 * (xnu patch 0047), then stop here with the watchdog disarmed so the
+	 * panel keeps the text for the camera. Never jumps to XNU.
+	 */
+	if (has_substr(p->cmdline, "sweetdump")) {
+		con_str("SWEETLOG", "diagnostic dump (no jump)");
+		/* Disarm TOPRGU first: the dump may outlast the 15 s shim watchdog. */
+		volatile uint32_t *mode = (volatile uint32_t *)0x1c007000UL;
+		uint32_t v = *mode;
+		v &= ~(1u << 0);
+		v &= ~(1u << 3);
+		v &= ~(1u << 6);
+		v |= 0x22000000u;
+		*mode = v;
+		con_hex("UFS up", (uint64_t)ufs_bringup());
+		sweetlog_dump();
+		con_skip();
+		con_str("SWEETLOG", "halted: power+vol-down to reset");
+		for (;;)
+			__asm__ volatile("wfi");
+	}
+
+	/*
 	 * If the payload asks for the internal UFS as root (rd=ufsroot0), bring
 	 * the link up and run the fDeviceInit handshake here, with the MMU off.
 	 * XNU's sweet_ufs.c reuses this state but can only take over the request

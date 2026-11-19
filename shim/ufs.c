@@ -1023,3 +1023,135 @@ void test_ufs(void)
 		return;
 	list_partitions(elba, nent);
 }
+
+/*
+ * Diagnostic (read-only): print the persistent console log a PREVIOUS boot
+ * left in the last SWEET_LOG_BLOCKS blocks of `userdata` (xnu patch 0047).
+ * The shim runs before XNU, so the log of the last boot is still intact.
+ * The header alone is decisive: `total` is the number of console bytes that
+ * boot produced (kernel printf + daemon /dev/console writes), and `seq` is
+ * how many times the writer thread flushed, so a boot that spends 35 min
+ * drawing a huge `total` of text is console-bound.
+ *
+ * Layout (sweet_ufs.c): area = the last (1 + 4 MiB/4096) device blocks of the
+ * partition; block 0 of the area is the header, the rest is the 4 MiB ring.
+ */
+#define SWEET_LOG_SIZE		(4u << 20)
+#define SWEET_LOG_BLOCKS	(1 + SWEET_LOG_SIZE / BLOCK)
+#define SWEET_LOG_KEEP		20
+
+struct sweet_log_header {
+	char magic[8];
+	uint32_t version, size;
+	uint64_t total, seq;
+};
+
+void sweetlog_dump(void)
+{
+	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
+	static uint8_t chunk[16 * BLOCK] __attribute__((aligned(4096)));
+	static char lines[SWEET_LOG_KEEP][72];
+
+	if (read_blocks(0, 2, data)) {
+		con_str("SWEETLOG", "GPT read error");
+		return;
+	}
+	const uint8_t *gpt = data + BLOCK;
+	uint32_t nent = gpt[80] | gpt[81] << 8 | gpt[82] << 16;
+	uint32_t esz = gpt[84] | gpt[85] << 8;
+	uint32_t elba = gpt[72] | gpt[73] << 8;
+	if (esz != 128 || nent > 128) {
+		con_str("SWEETLOG", "bad GPT header");
+		return;
+	}
+	if (read_blocks(elba, (nent * 128 + BLOCK - 1) / BLOCK, ents)) {
+		con_str("SWEETLOG", "GPT entries read error");
+		return;
+	}
+	uint64_t first = 0, last = 0;
+	for (uint32_t i = 0; i < nent; i++) {
+		const uint8_t *e = ents + i * 128;
+		char name[17];
+		for (int c = 0; c < 16; c++) {
+			uint8_t ch = e[56 + 2 * c];
+			name[c] = (ch >= 32 && ch < 127) ? ch : (ch ? '?' : 0);
+		}
+		name[16] = 0;
+		static const char want[] = "userdata";
+		int match = 1;
+		for (int k = 0; k < (int)sizeof(want); k++) {
+			if (name[k] != want[k]) {
+				match = 0;
+				break;
+			}
+		}
+		if (match) {
+			first = le64(e + 32);
+			last = le64(e + 40);
+			break;
+		}
+	}
+	if (!last || last - first + 1 < 2 * SWEET_LOG_BLOCKS) {
+		con_str("SWEETLOG", "no userdata partition");
+		return;
+	}
+	uint64_t hdr_lba = last + 1 - SWEET_LOG_BLOCKS;
+	ufs_log2("SWEETLOG", "userdata lba=", (uint32_t)first,
+	    "blk=", (uint32_t)(last - first + 1));
+
+	if (read_blocks((uint32_t)hdr_lba, 1, data)) {
+		con_str("SWEETLOG", "header read error");
+		return;
+	}
+	const struct sweet_log_header *h = (const struct sweet_log_header *)data;
+	char m[9];
+	for (int i = 0; i < 8; i++)
+		m[i] = (h->magic[i] >= 32 && h->magic[i] < 127) ? h->magic[i] : '.';
+	m[8] = 0;
+	static const char magic[] = "SWEETLOG";
+	int ok = 1;
+	for (int i = 0; i < 8; i++) {
+		if (h->magic[i] != magic[i]) {
+			ok = 0;
+			break;
+		}
+	}
+	if (!ok) {
+		ufs_log1("SWEETLOG magic", m);
+		con_str("SWEETLOG", "no log from a previous boot");
+		return;
+	}
+	ufs_log2("SWEETLOG", "ver=", h->version, "size=", h->size);
+	con_hex("SWEETLOG total", h->total);
+	con_hex("SWEETLOG seq", h->seq);
+
+	/* Scan the ring, keep the last SWEET_LOG_KEEP newline-terminated lines. */
+	uint32_t head = 0, n = 0, clen = 0;
+	char cur[72];
+	for (uint32_t off = 0; off < SWEET_LOG_SIZE; off += sizeof(chunk)) {
+		if (read_blocks((uint32_t)(hdr_lba + 1 + off / BLOCK),
+		    sizeof(chunk) / BLOCK, chunk))
+			break;
+		for (uint32_t i = 0; i < sizeof(chunk); i++) {
+			char c = (char)chunk[i];
+			if (c == '\n' || c == '\r') {
+				if (!clen)
+					continue;
+				cur[clen] = 0;
+				for (uint32_t k = 0; k <= clen; k++)
+					lines[head][k] = cur[k];
+				head = (head + 1) % SWEET_LOG_KEEP;
+				if (n < SWEET_LOG_KEEP)
+					n++;
+				clen = 0;
+			} else if (clen < sizeof(cur) - 1) {
+				cur[clen++] = (c >= 32 && c < 127) ? c : '.';
+			}
+		}
+	}
+	ufs_log2("SWEETLOG", "lines=", n, "head=", head);
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t idx = (head + SWEET_LOG_KEEP - n + i) % SWEET_LOG_KEEP;
+		con_str("LOG", lines[idx]);
+	}
+}
