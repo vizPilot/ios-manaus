@@ -12,6 +12,12 @@ void test_ufs(void);
 /* Negotiated UniPro link parameters (for the panel diagnostic). */
 void ufs_link_info(uint32_t *tx, uint32_t *rx, uint32_t *mode, uint32_t *lanes);
 /*
+ * Raise the UniPro link from the PWM-G1/SLOWAUTO state DME_LINK_STARTUP leaves
+ * to HS FAST_MODE (the step Linux does in ufshcd_probe_hba but the shim used to
+ * skip). Call only with the link already up. Returns 0 when the link is HS.
+ */
+int ufs_raise_gear(void);
+/*
  * Diagnostic: read the persistent console log (xnu patch 0047) the previous
  * boot left in the last blocks of `userdata` and print its header and tail to
  * the panel. Read-only. Call after ufs_bringup().

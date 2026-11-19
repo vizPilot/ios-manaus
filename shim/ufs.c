@@ -132,6 +132,7 @@
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
+#define REG_AHIT	0x18	/* auto-hibernate idle timer */
 #define REG_IS		0x20
 #define REG_IE		0x24
 #define REG_HCS		0x30
@@ -166,6 +167,8 @@
 /* UIC DME commands (JESD223 uic_cmd_dme). */
 #define UIC_DME_GET		0x01
 #define UIC_DME_SET		0x02
+#define UIC_DME_PEER_GET	0x03
+#define UIC_DME_PEER_SET	0x04
 #define UIC_DME_ENABLE		0x12
 #define UIC_DME_RESET		0x14
 #define UIC_DME_LINK_STARTUP	0x16
@@ -174,14 +177,46 @@
 /* UniPro attribute IDs (include/ufs/unipro.h); ARG1 = (attr & 0xffff) << 16. */
 #define ATTR_PA_LOCAL_TX_LCC_ENABLE	0x155E
 #define ATTR_PA_ACTIVETXDATALANES	0x1560
+#define ATTR_PA_CONNECTEDTXDATALANES	0x1561
 #define ATTR_PA_TXGEAR			0x1568
+#define ATTR_PA_TXTERMINATION		0x1569
+#define ATTR_PA_HSSERIES		0x156A
 #define ATTR_PA_PWRMODE			0x1571
 #define ATTR_PA_ACTIVERXDATALANES	0x1580
+#define ATTR_PA_CONNECTEDRXDATALANES	0x1581
 #define ATTR_PA_RXGEAR			0x1583
+#define ATTR_PA_RXTERMINATION		0x1584
+#define ATTR_PA_MAXRXPWMGEAR		0x1586
+#define ATTR_PA_MAXRXHSGEAR		0x1587
 #define ATTR_PA_LOCALVERINFO		0x15A9
+#define ATTR_PA_PWRMODEUSERDATA0	0x15B0
+#define ATTR_PA_PWRMODEUSERDATA1	0x15B1
+#define ATTR_PA_PWRMODEUSERDATA2	0x15B2
+#define ATTR_PA_PWRMODEUSERDATA3	0x15B3
+#define ATTR_PA_PWRMODEUSERDATA4	0x15B4
+#define ATTR_PA_PWRMODEUSERDATA5	0x15B5
+#define ATTR_PA_TXHSADAPTTYPE		0x15D4
+#define ATTR_DME_LOCAL_FC0_PROT_TIMEOUT	0xD041
+#define ATTR_DME_LOCAL_TC0_REPLAY_TIMEOUT 0xD042
+#define ATTR_DME_LOCAL_AFC0_REQ_TIMEOUT	0xD043
 #define ATTR_VS_DEBUGCLOCKENABLE	0xD0A1
 #define ATTR_VS_SAVEPOWERCONTROL	0xD0A6
 #define ATTR_VS_UNIPROPOWERDOWNCONTROL	0xD0A8
+
+/*
+ * UniPro PA layer constants (include/ufs/unipro.h). After DME_LINK_STARTUP the
+ * link sits in PWM-G1 / SLOWAUTO_MODE with one lane, which is what the shim
+ * used to leave for XNU; ufs_raise_gear() moves it to HS with FAST_MODE.
+ */
+#define PA_FAST_MODE		1
+#define PA_HS_MODE_B		2
+#define PA_INITIAL_ADAPT	0x01
+#define PA_NO_ADAPT		0x03
+/* Default UniPro data-link timeout values (unipro.h). */
+#define DL_FC0_PROT_TIMEOUT	8191
+#define DL_TC0_REPLAY_TIMEOUT	65535
+#define DL_AFC0_REQ_TIMEOUT	32767
+#define UFS_HS_G4		4
 
 /* MediaTek UFS wrapper registers (drivers/ufs/host/ufs-mediatek.h). */
 #define REG_MTK_XOUFS_CTRL	0x140
@@ -324,13 +359,15 @@ static void ufs_log1(const char *label, const char *val)
 
 /*
  * One UIC command (DME_*): arguments into ARG_1..3, opcode into UIC_CMD, then
- * wait for the completion interrupt bit. Returns 0 on completion (even when
- * the DME result is an error), 1 on timeout. *cmd_out carries the raw UIC_CMD
- * register (command status in bits [31:24]), *arg2_out the DME result
- * (MASK_UIC_COMMAND_RESULT = low byte) and *arg3_out the generic error code.
+ * wait for any of wait_mask in the interrupt status. Returns 0 on completion
+ * (even when the DME result is an error), 1 on timeout. *cmd_out carries the
+ * raw UIC_CMD register (command status in bits [31:24]), *arg2_out the DME
+ * result (MASK_UIC_COMMAND_RESULT = low byte) and *arg3_out the generic error
+ * code. Most DME commands complete on IS_UIC_COMPL; a PA_PWRMODE change
+ * completes on IS_UIC_PWR, so it passes both bits.
  */
-static uint32_t uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
-    uint32_t *cmd_out, uint32_t *arg2_out, uint32_t *arg3_out)
+static uint32_t uic_cmd_mask(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
+    uint32_t wait_mask, uint32_t *cmd_out, uint32_t *arg2_out, uint32_t *arg3_out)
 {
 	ufs_wr(REG_IS, ufs_rd(REG_IS));		/* RW1C: clear whatever is pending */
 	ufs_wr(REG_UIC_ARG1, a1);
@@ -339,7 +376,7 @@ static uint32_t uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
 	__asm__ volatile("dsb sy" ::: "memory");
 	ufs_wr(REG_UIC_CMD, op & 0xff);
 	uint64_t start = ticks();
-	while (!(ufs_rd(REG_IS) & IS_UIC_COMPL)) {
+	while (!(ufs_rd(REG_IS) & wait_mask)) {
 		if (ticks() - start > 19200000) {	/* 1 s */
 			*cmd_out = ufs_rd(REG_UIC_CMD);
 			*arg2_out = ufs_rd(REG_UIC_ARG2);
@@ -351,8 +388,14 @@ static uint32_t uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
 	*cmd_out = ufs_rd(REG_UIC_CMD);
 	*arg2_out = ufs_rd(REG_UIC_ARG2);
 	*arg3_out = ufs_rd(REG_UIC_ARG3);
-	ufs_wr(REG_IS, IS_UIC_COMPL);
+	ufs_wr(REG_IS, wait_mask);
 	return 0;
+}
+
+static uint32_t uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3,
+    uint32_t *cmd_out, uint32_t *arg2_out, uint32_t *arg3_out)
+{
+	return uic_cmd_mask(op, a1, a2, a3, IS_UIC_COMPL, cmd_out, arg2_out, arg3_out);
 }
 
 static void uic_log(const char *tag, uint32_t op, uint32_t rc, uint32_t cmd, uint32_t a2, uint32_t a3)
@@ -415,6 +458,27 @@ static uint32_t dme_get(uint32_t attr, uint32_t *val, uint32_t *a2)
 	uint32_t rc = uic_cmd(UIC_DME_GET, (attr & 0xffff) << 16, 0, 0, &cmd, a2, &a3);
 	*val = a3;
 	return rc;
+}
+
+/* DME_GET addressed at the peer (the UFS device) instead of locally. */
+static uint32_t dme_peer_get(uint32_t attr, uint32_t *val, uint32_t *a2)
+{
+	uint32_t cmd, a3;
+	uint32_t rc = uic_cmd(UIC_DME_PEER_GET, (attr & 0xffff) << 16, 0, 0, &cmd, a2, &a3);
+	*val = a3;
+	return rc;
+}
+
+/*
+ * The PA_PWRMODE change itself: DME_SET(PA_PWRMODE). Unlike the other DME
+ * commands this completes on IS_UIC_PWR (UIC_POWER_MODE), not IS_UIC_COMPL,
+ * which is what ufshcd_uic_pwr_ctrl() waits on via uic_async_done.
+ */
+static uint32_t dme_pwr_mode(uint32_t mode, uint32_t *a2)
+{
+	uint32_t cmd, a3;
+	return uic_cmd_mask(UIC_DME_SET, (ATTR_PA_PWRMODE & 0xffff) << 16, 0, mode,
+	    IS_UIC_COMPL | IS_UIC_PWR, &cmd, a2, &a3);
 }
 
 /*
@@ -959,6 +1023,98 @@ void ufs_link_info(uint32_t *tx, uint32_t *rx, uint32_t *mode, uint32_t *lanes)
 	dme_get(ATTR_PA_RXGEAR, rx, &a2);
 	dme_get(ATTR_PA_PWRMODE, mode, &a2);
 	dme_get(ATTR_PA_ACTIVETXDATALANES, lanes, &a2);
+}
+
+/*
+ * Raise the UniPro link out of the PWM-G1 / SLOWAUTO_MODE state that
+ * DME_LINK_STARTUP leaves behind, to HS FAST_MODE. Linux does this in
+ * ufshcd_probe_hba() -> ufshcd_negotiate_pwr_params() -> ufshcd_change_power_mode()
+ * right after link startup; the shim used to stop at link startup, so XNU read
+ * the 11 GiB root at PWM speed. This is the MTK path with no `pmc-via-fastauto`
+ * flag (the manaus DT has none), i.e. ufshcd_dme_change_power_mode() plus the
+ * MTK PRE_CHANGE adapt setting:
+ *
+ *   1. read the HS gear capability of both sides and the connected lanes,
+ *   2. set PA_RXGEAR/TXGEAR, PA_ACTIVE{RX,TX}DATALANES, PA_{RX,TX}TERMINATION,
+ *      PA_HSSERIES and PA_TXHSADAPTTYPE,
+ *   3. program the default UniPro data-link timeouts,
+ *   4. DME_SET(PA_PWRMODE) = FAST_MODE<<4 | FAST_MODE,
+ *   5. read the state back.
+ *
+ * Returns 0 on success (the link is HS), 1 otherwise; the caller must not
+ * assume the link survived. Safe to call only with the link already up.
+ */
+int ufs_raise_gear(void)
+{
+	uint32_t a2 = 0;
+	uint32_t h_rx = 0, p_rx = 0, lane_rx = 0, lane_tx = 0;
+	uint32_t gear_rx, gear_tx, lanes;
+
+	uint32_t b_tx = 0, b_rx = 0, b_mode = 0, b_lanes = 0;
+	ufs_link_info(&b_tx, &b_rx, &b_mode, &b_lanes);
+	ufs_log2("UFS HSWAS", "tx=", b_tx, "rx=", b_rx);
+	ufs_log2("UFS HSWAS", "mode=", b_mode, "lanes=", b_lanes);
+
+	if (dme_get(ATTR_PA_MAXRXHSGEAR, &h_rx, &a2) ||
+	    dme_peer_get(ATTR_PA_MAXRXHSGEAR, &p_rx, &a2)) {
+		ufs_log2("UFS HSERR", "host=", h_rx, "peer=", p_rx);
+		return 1;
+	}
+	dme_get(ATTR_PA_CONNECTEDRXDATALANES, &lane_rx, &a2);
+	dme_get(ATTR_PA_CONNECTEDTXDATALANES, &lane_tx, &a2);
+	ufs_log2("UFS HSCAP", "hrx=", h_rx, "prx=", p_rx);
+	ufs_log2("UFS HSCAP", "lr=", lane_rx, "lt=", lane_tx);
+
+	if (!h_rx || !p_rx || !lane_rx || !lane_tx) {
+		ufs_log1("UFS HS", "no HS gear/lane capability");
+		return 1;
+	}
+	gear_rx = h_rx;			/* our RX <= peer's TX; assume symmetric */
+	gear_tx = p_rx;			/* our TX <= peer's RX (PA_MAXRXHSGEAR) */
+	if (gear_rx > 5)
+		gear_rx = 5;		/* MTK clamps to HS-G5 */
+	if (gear_tx > 5)
+		gear_tx = 5;
+	lanes = lane_rx < lane_tx ? lane_rx : lane_tx;
+	if (lanes > 2)
+		lanes = 2;		/* manaus is 2-lane */
+
+	/* Stop auto-hibernate (MTK PRE_CHANGE) so the change is not raced. */
+	ufs_wr(REG_AHIT, 0);
+
+	dme_set(ATTR_PA_RXGEAR, gear_rx, &a2);
+	dme_set(ATTR_PA_ACTIVERXDATALANES, lanes, &a2);
+	dme_set(ATTR_PA_RXTERMINATION, 1, &a2);
+	dme_set(ATTR_PA_TXGEAR, gear_tx, &a2);
+	dme_set(ATTR_PA_ACTIVETXDATALANES, lanes, &a2);
+	dme_set(ATTR_PA_TXTERMINATION, 1, &a2);
+	dme_set(ATTR_PA_HSSERIES, PA_HS_MODE_B, &a2);
+	dme_set(ATTR_PA_TXHSADAPTTYPE, gear_tx >= UFS_HS_G4 ? PA_INITIAL_ADAPT : PA_NO_ADAPT, &a2);
+
+	dme_set(ATTR_PA_PWRMODEUSERDATA0, DL_FC0_PROT_TIMEOUT, &a2);
+	dme_set(ATTR_PA_PWRMODEUSERDATA1, DL_TC0_REPLAY_TIMEOUT, &a2);
+	dme_set(ATTR_PA_PWRMODEUSERDATA2, DL_AFC0_REQ_TIMEOUT, &a2);
+	dme_set(ATTR_PA_PWRMODEUSERDATA3, DL_FC0_PROT_TIMEOUT, &a2);
+	dme_set(ATTR_PA_PWRMODEUSERDATA4, DL_TC0_REPLAY_TIMEOUT, &a2);
+	dme_set(ATTR_PA_PWRMODEUSERDATA5, DL_AFC0_REQ_TIMEOUT, &a2);
+	dme_set(ATTR_DME_LOCAL_FC0_PROT_TIMEOUT, DL_FC0_PROT_TIMEOUT, &a2);
+	dme_set(ATTR_DME_LOCAL_TC0_REPLAY_TIMEOUT, DL_TC0_REPLAY_TIMEOUT, &a2);
+	dme_set(ATTR_DME_LOCAL_AFC0_REQ_TIMEOUT, DL_AFC0_REQ_TIMEOUT, &a2);
+
+	uint32_t rc = dme_pwr_mode((PA_FAST_MODE << 4) | PA_FAST_MODE, &a2);
+	ufs_log2("UFS HSPMC", "rc=", rc, "arg2=", a2);
+
+	uint32_t a_tx = 0, a_rx = 0, a_mode = 0, a_lanes = 0;
+	ufs_link_info(&a_tx, &a_rx, &a_mode, &a_lanes);
+	ufs_log2("UFS HSNOW", "tx=", a_tx, "rx=", a_rx);
+	ufs_log2("UFS HSNOW", "mode=", a_mode, "lanes=", a_lanes);
+	ufs_log2("UFS HSNOW", "hcs=", ufs_rd(REG_HCS), "probe=", probe_state());
+
+	/* HS is confirmed only if the mode is FAST and the device is present. */
+	if (rc || (a_mode & 0xf) != PA_FAST_MODE || (a_mode >> 4) != PA_FAST_MODE ||
+	    !(ufs_rd(REG_HCS) & HCS_DP))
+		return 1;
+	return 0;
 }
 
 void test_ufs(void)

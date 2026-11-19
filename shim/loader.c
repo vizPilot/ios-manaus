@@ -159,6 +159,8 @@ const char *loader_boot(uintptr_t dtb)
 		v |= 0x22000000u;
 		*mode = v;
 		con_hex("UFS up", (uint64_t)ufs_bringup());
+		if (has_substr(p->cmdline, "sweetgear"))
+			con_hex("UFS HS ok", (uint64_t)ufs_raise_gear());
 		sweetlog_dump();
 		con_skip();
 		con_str("SWEETLOG", "halted: power+vol-down to reset");
@@ -177,6 +179,13 @@ const char *loader_boot(uintptr_t dtb)
 	if (has_substr(p->cmdline, "ufsroot")) {
 		con_str("UFS", "bring-up for rd=ufsroot0 (payload)");
 		con_hex("UFS up", (uint64_t)ufs_bringup());
+		/*
+		 * Raise the link out of PWM-G1 before the jump: XNU's sweet_ufs.c
+		 * reuses whatever gear the shim leaves, so a low gear here makes
+		 * the whole root read (11 GiB) crawl. Opt-in via sweetgear=1.
+		 */
+		if (has_substr(p->cmdline, "sweetgear"))
+			con_hex("UFS HS ok", (uint64_t)ufs_raise_gear());
 	}
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
