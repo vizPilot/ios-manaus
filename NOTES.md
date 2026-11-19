@@ -27,33 +27,52 @@ lock screen has **no wallpaper** (assets exist under
 `/Library/Wallpaper/Collections/`; likely no preference written because Setup was
 skipped) — cosmetic, not the bounding-path crash.
 
-**🔧 BOOT ACCELERATION (2026-11-18) — all cmdline-only, no kernel rebuild.**
-Boot #8 runs `cpus=1` (single core) and the boot is CPU-bound: on sweet the same
-`cpus=1` made the data migration take ~60 min, input latency ~1 min, and the
-per-swap full-frame panel copy starved everything. Levers:
-1. **`cpus=6`** (the six A55 cores; exactly the config sweet ran to its home
-   screen) or **`cpus=8`** (+2 A76). `cpus=N` selects the first N of the 8 ADT
-   CPUs (`SweetCPU::startAll`, patch 0065); patch 0078 raised
-   `SWEET_SMP_MAX_CPUS` to 8. The shim already proved PSCI `CPU_ON` for **all 7
-   secondaries** on manaus (NOTES ~L1470), so secondaries are known to start.
-2. **`ufscache=1 ufswait=1`** (patch 0069, never enabled on manaus): directional
-   cache maintenance instead of full `dma_sync`, and sleep-instead-of-spin while
-   a UFS command is in flight (frees the other CPUs). Both were left "optional,
-   not yet applied" on sweet, so treat as unproven and test on top of `cpus=6`.
-3. `-noprogress`/`sweetfb_noconsole=1` only affect console readability/drawing,
-   not boot time materially; left alone so the panel stays diagnostic.
+**🔧 BOOT ACCELERATION (2026-11-18) — the 35 min is NOT CPU-bound.**
+Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
+1. **`cpus=6` / `cpus=8`** (patch 0065 `SweetCPU::startAll`; 0078 raised
+   `SWEET_SMP_MAX_CPUS` to 8). **Boot #9 = `cpus=6` → 34m52s** vs boot #8
+   `cpus=1` **>35 min**: raising the core count did **not** move the needle.
+   On sweet the same jump cut the data migration from ~60 min, so the manaus
+   35 min is a **serialized single-threaded resource**, not parallel CPU work.
+   The shim already proved PSCI `CPU_ON` for all 7 secondaries (NOTES ~L1470).
+2. **`ufscache=1 ufswait=1`** (patch 0069): **boot #10 (cpus=6 + flags) did not
+   reach the lock screen in time** → no material gain. Directional cache
+   maintenance / sleep-vs-spin are micro-optimizations; do not rely on them.
+3. `-noprogress` / `sweetfb_hz=1` / `sweetlog=0`: **boot #11 (`fast-quiet`)
+   started 2026-11-18 21:04:33**. `sweetlog=0` kills the log-write thread, which
+   takes the **same `sweet_ufs_lock`** as reads and writes up to 4 MiB every
+   10 s — the cheapest test of write/read contention. Result: _pending_.
+- **Suspects (need data, not guesses):** (a) the **FB text console draw** (patch
+  0003: 16×2×8×2 uncached-WC pixel writes per char, and every newline clears
+  *two* full 1080-px rows, all under one console lock); (b) the **single-slot UFS
+  read path** (`sweet_ufs_strategy`, one command in flight, 4 KiB device blocks);
+  (c) the **SWEETLOG flush thread** contending on `sweet_ufs_lock`.
+- **DIAGNOSTIC READY — shim SWEETLOG read-back (no CI, no kernel rebuild):** the
+  shim (`shim/loader.c` + `shim/ufs.c` `sweetlog_dump()`, commit `010d503`) now
+  prints the header (`total` console bytes + `seq` flush count) and the last 20
+  ring lines of the log the **previous** boot left in `userdata` (patch 0047),
+  then halts with the watchdog disarmed so the panel keeps the text. Build:
+  `shim/build.sh` locally (WSL `aarch64-linux-gnu-gcc`) → `tools/mkpayload.py` →
+  `tools/mkbootimg-manaus.sh shim/out/Image <payload> <stock dtb> <out> --mode v4`
+  with `sweetdump=1` in the payload cmdline. Images (2026-11-18; ADT `5587666f…`
+  + `/product` verified): `D:\manaus\sweetdump\shim-boot.img` `de66a904…` /
+  `shim-vendor_boot.img` `8d0dc7da…`. Flash over the current `boot_a` /
+  `vendor_boot_a`, reboot, photograph the panel. **`total` alone decides:** a
+  huge `total` (tens of MB) ⇒ console-bound; a small one (≪1 MB) ⇒ the time is
+  UFS I/O, not console draw.
 - **Prepared + verified images, patched in place from the proven boot #8 images**
   with the new **`tools/bootimg-cmdline.py`** (only the cmdline token changes;
   ADT `5587666f…` and everything else byte-identical, size unchanged):
   - `D:\manaus\fast-cpus6\`  boot `8cf23db2…` / vendor_boot `f735ff65…`
   - `D:\manaus\fast-cpus8\`  boot `1d3c2049…` / vendor_boot `98b72626…`
   - `D:\manaus\fast-cpus6-ufs\` boot `49034e01…` / vendor_boot `526d9647…`
+  - `D:\manaus\fast-quiet\`  boot `c4b8924a…` / vendor_boot `c89ec0cc…`
 - **⚠️ STALE, DO NOT FLASH:** `D:\manaus\shim-cpus2|cpus6|log0\` were built
   2026-11-17 **before** the `/product` fix; their ADT is the old 10,376 B one
   **with no `/product`** → flashing them would re-break boot #8.
-- **Boot #9 = `cpus=6`** flashed 2026-11-18 18:10 (boot_a+vendor_boot_a both
-  `OKAY`; script `D:\manaus\flash-cpus.ps1`, log `flash-fast-cpus6.log`),
-  rebooted 18:10:09. Result: _pending user observation_.
+- **Boot log:** #8 `cpus=1` >35 min; #9 `cpus=6` **34m52s**; #10 `cpus=6
+  ufscache=1 ufswait=1` >35 min (no lock screen in the observed window);
+  #11 `cpus=6 -noprogress sweetfb_hz=1 sweetlog=0` started 21:04:33, _pending_.
 
 **M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
