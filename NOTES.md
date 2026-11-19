@@ -15,10 +15,10 @@ catalog: the flashed ADT had **no `/product` node**, so MobileGestalt's
 by rebuilding `boot_a`/`vendor_boot_a` with the real iPhone X `/product` node.
 `userdata` (the noflood root) is unchanged from boot #7.
 
-**Current work (2026-11-18): boot acceleration.** The 35-min boot is not
-CPU-bound; the shim now raises the UFS link from PWM to HS (`ufs_raise_gear()`,
-committed `9a7f819`). Boot #13 confirmed HS + a healthy device; boot #14
-(`fast-hs`) is timing the real boot — see the acceleration section below.
+**Current work (2026-11-18): boot acceleration — ✅ SOLVED.** The 35-min boot
+was the UFS link gear, not CPU. The shim now raises the link from PWM to HS
+(`ufs_raise_gear()`, committed `9a7f819`); boot #14 (`fast-hs`) reached the lock
+screen in **≈1.5 min** (was 34m52s). See the acceleration section below.
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
@@ -133,10 +133,17 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   #11 `cpus=6 -noprogress sweetfb_hz=1 sweetlog=0` no lock screen;
   #12 `sweetdump-hs` HS reached (`mode=0x11`) but SWEETLOG read hit a UA;
   #13 `sweetdump-hs` (rebuilt shim) HS + UA handled, log read OK;
-  #14 `fast-hs` (`cpus=6 sweetgear=1`) started 2026-11-18 22:07:50, _pending_.
-- **▶️ NEXT:** read boot #14's time-to-lock-screen. If it beats 34m52s
-  materially, the UFS gear was the serialized bottleneck. If not, the console
-  draw (patch 0003) is next — see the `sweetmute=1` contingency below.
+  #14 `fast-hs` (`cpus=6 sweetgear=1`) started 2026-11-18 22:07:50 →
+  **lock screen in ≈1.5 min** (user-observed).
+- **✅ RESULT: the UFS link gear was the serialized 35-min bottleneck.** PWM
+  (`PA_PWRMODE=0x55`) → HS (`0x11`) took the boot from **34m52s to ≈1.5 min**
+  (~23×). The suspect list (console draw, single-slot read path, SWEETLOG
+  flush thread) is now closed: none of them mattered. `sweetgear` is the lever.
+- **▶️ NEXT:** the acceleration goal is met. Follow-ups: (a) make the gear raise
+  the default instead of requiring the `sweetgear` token (a one-line change in
+  `shim/loader.c`), so every future image boots fast; (b) confirm the lock screen
+  is stable on repeated `fast-hs` boots; (c) resume the wallpaper/UI work once the
+  screen is replaced.
   - XNU cannot undo the raise: `ufs_take_over_host()` (patch 0028) only *checks*
     `HCE`/`HCS.DP`/`HCS.UTRLRDY` and reuses the host; it never re-negotiates.
   - **`sweetmute=1` contingency (if console-bound):** mute the kernel console
