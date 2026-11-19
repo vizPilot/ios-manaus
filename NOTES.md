@@ -15,14 +15,19 @@ catalog: the flashed ADT had **no `/product` node**, so MobileGestalt's
 by rebuilding `boot_a`/`vendor_boot_a` with the real iPhone X `/product` node.
 `userdata` (the noflood root) is unchanged from boot #7.
 
+**Current work (2026-11-18): boot acceleration.** The 35-min boot is not
+CPU-bound; the shim now raises the UFS link from PWM to HS (`ufs_raise_gear()`,
+committed `9a7f819`). Boot #13 confirmed HS + a healthy device; boot #14
+(`fast-hs`) is timing the real boot — see the acceleration section below.
+
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
 verified and committed (`966027b` on `origin/manaus`). Nothing is left
 half-done; resume by re-flashing/rebooting the current images and observing the
-lock screen again. On-device state at pause: `boot_a`/`vendor_boot_a` =
-`D:\manaus\shim-m6b5p\shim-boot.img` (`e74851d0…`) +
-`shim-vendor_boot.img` (`edafc7b3…`); `userdata` = the noflood root
-(`3d9fde99…`); `current-slot=a`, `product=manaus`. Known non-blocking issue:
+lock screen again. On-device state now: `boot_a`/`vendor_boot_a` =
+`D:\manaus\fast-hs\` (`79bd0b42…` / `02df7ddc…`, boot #14, the accelerated
+boot); `userdata` = the noflood root (`3d9fde99…`); `current-slot=a`,
+`product=manaus`. Known non-blocking issue:
 lock screen has **no wallpaper** (assets exist under
 `/Library/Wallpaper/Collections/`; likely no preference written because Setup was
 skipped) — cosmetic, not the bounding-path crash.
@@ -39,9 +44,10 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
    reach the lock screen in time** → no material gain. Directional cache
    maintenance / sleep-vs-spin are micro-optimizations; do not rely on them.
 3. `-noprogress` / `sweetfb_hz=1` / `sweetlog=0`: **boot #11 (`fast-quiet`)
-   started 2026-11-18 21:04:33**. `sweetlog=0` kills the log-write thread, which
-   takes the **same `sweet_ufs_lock`** as reads and writes up to 4 MiB every
-   10 s — the cheapest test of write/read contention. Result: _pending_.
+   did NOT reach the lock screen** ⇒ console throttling and SWEETLOG
+   write/read contention on `sweet_ufs_lock` are **ruled out**. `sweetlog=0`
+   kills the log-write thread, which takes the **same `sweet_ufs_lock`** as
+   reads and writes up to 4 MiB every 10 s.
 - **Suspects (need data, not guesses):** (a) the **FB text console draw** (patch
   0003: 16×2×8×2 uncached-WC pixel writes per char, and every newline clears
   *two* full 1080-px rows, all under one console lock); (b) the **UFS link gear**
@@ -78,21 +84,40 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   Panel lines: `UFS HSWAS` (before), `UFS HSCAP` (capabilities), `UFS HSPMC`
   (rc), `UFS HSNOW` (after + HCS + probe state). XNU then inherits the faster
   link. Build clean: 0 ABS64 relocs, `shim/out/Image` `68f3f8b4…`.
-- **DIAGNOSTIC + FIX IMAGES (2026-11-18; ADT `5587666f…` + `/product` verified):**
-  - `D:\manaus\sweetdump\` — pure diagnostic, `sweetdump=1`. boot `858f70d2…` /
-    vendor_boot `8d0dc7da…`. Prints the **before** link (PWM-G1 expected), the
+- **DIAGNOSTIC + FIX IMAGES (rebuilt 2026-11-18 after the `read_blocks` retry +
+  `ufs_raise_gear` re-init/TUR fix; shim `aa1e8aa7…`; ADT `5587666f…` +
+  `/product` verified):**
+  - `D:\manaus\sweetdump\` — pure diagnostic, `sweetdump=1`. boot `fcd6891b…` /
+    vendor_boot `8d0dc7da…`. Prints the **before** link, the
     SWEETLOG `total`/`seq` and the last 40 ring lines, then halts (watchdog
     disarmed) so the panel keeps the text.
-  - `D:\manaus\sweetdump-hs\` — `sweetdump=1 sweetgear=1`. boot `c5b39f65…` /
+  - `D:\manaus\sweetdump-hs\` — `sweetdump=1 sweetgear=1`. boot `e635c229…` /
     vendor_boot `614b8e2d…`. Same, but raises the gear first and reprints the
-    **after** link — a fast on-panel test of the fix.
-  - `D:\manaus\fast-hs\` — `sweetgear=1`. boot `6a078154…` / vendor_boot
+    **after** link + the HS outcome.
+  - `D:\manaus\fast-hs\` — `sweetgear=1`. boot `79bd0b42…` / vendor_boot
     `02df7ddc…`. The real accelerated boot (no dump; jumps to XNU).
   Flash over the current `boot_a`/`vendor_boot_a`, reboot, photograph the panel.
   **How to read the dump:** `total` ≫ ~20 MB (or 40 identical tail lines) ⇒
   console-bound (mute the console); `total` ≪ 1 MB ⇒ UFS-bound (the gear is the
   lever). `UFS PWR mode`: `0`=Fast_Mode (HS), `1`=Slow_Mode, `4`=FastAuto,
   `5`=SlowAuto; `0x11` after the raise = tx=1/rx=1 = **FAST (HS)**.
+- **✅ BOOT #12 (`sweetdump-hs`, first HS attempt): the link DOES reach HS.**
+  Panel OCR: `UFS GEAR tx=00000003`, `UFS PWR mode=00000011` (tx=1/rx=1 = FAST).
+  The raise worked. **But** the SWEETLOG read failed: `UFS SENSE rsp=00000021
+  len=00000012 asc=00000029` + `SWEETLOG GPT read error`. `ASC 0x29` = unit
+  attention (POWER ON/RESET) — the power-mode change re-initializes the link and
+  the device raises a UA on the next command; `sweetlog_dump()`'s
+  `read_blocks()` did not retry.
+- **✅ BOOT #13 (`sweetdump-hs`, rebuilt shim): UA handled, device healthy.**
+  Panel OCR (labels confirmed against `shim/ufs.c` `sweetlog_dump()`):
+  `UFS PWR mode=00000011` (HS), `UFS HS pwr rc=00000000 devinit=00000000`
+  (power-mode change **and** `device_init()` both OK), `UFS HS tur
+  rc=00000000 was=00000055` (post-raise TUR OK; pre-raise mode was `0x55` =
+  PWM, so the raise really changed it), then the SWEETLOG block read back and
+  printed with **no `GPT read error`**. Fix committed `9a7f819` (pushed).
+  `read_blocks()` now retries 3× on CHECK CONDITION; `ufs_raise_gear()` re-runs
+  `device_init()` + a 3× TUR after the power change (mirrors Linux's ordering;
+  XNU never re-inits the device).
 - **Prepared + verified images, patched in place from the proven boot #8 images**
   with the new **`tools/bootimg-cmdline.py`** (only the cmdline token changes;
   ADT `5587666f…` and everything else byte-identical, size unchanged):
@@ -105,22 +130,21 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   **with no `/product`** → flashing them would re-break boot #8.
 - **Boot log:** #8 `cpus=1` >35 min; #9 `cpus=6` **34m52s**; #10 `cpus=6
   ufscache=1 ufswait=1` >35 min (no lock screen in the observed window);
-  #11 `cpus=6 -noprogress sweetfb_hz=1 sweetlog=0` started 21:04:33, _pending_.
-- **▶️ NEXT (when the screen is back):** flash **`sweetdump-hs`** first (fast, no
-  35-min wait): its panel shows whether `ufs_raise_gear()` reached HS
-  (`UFS HSNOW mode=0x11` = FAST) and the SWEETLOG header. Then flash **`fast-hs`**
-  and time the boot. Notes:
-  - **`sweetlog=0` in boot #11 means that boot wrote no log**, so the dump
-    currently shows **boot #10's** log (a partial boot). Its `total` is still a
-    valid lower bound; a re-dump after a `fast-hs` boot gives a full-boot number.
+  #11 `cpus=6 -noprogress sweetfb_hz=1 sweetlog=0` no lock screen;
+  #12 `sweetdump-hs` HS reached (`mode=0x11`) but SWEETLOG read hit a UA;
+  #13 `sweetdump-hs` (rebuilt shim) HS + UA handled, log read OK;
+  #14 `fast-hs` (`cpus=6 sweetgear=1`) started 2026-11-18 22:07:50, _pending_.
+- **▶️ NEXT:** read boot #14's time-to-lock-screen. If it beats 34m52s
+  materially, the UFS gear was the serialized bottleneck. If not, the console
+  draw (patch 0003) is next — see the `sweetmute=1` contingency below.
   - XNU cannot undo the raise: `ufs_take_over_host()` (patch 0028) only *checks*
     `HCE`/`HCS.DP`/`HCS.UTRLRDY` and reuses the host; it never re-negotiates.
-  - If `total` turns out huge (console-bound), the contingency is to mute the
-    kernel console early: `sweet_log_append()` (patch 0047) already runs *before*
-    the `disableConsoleOutput` check, so a mute keeps the log. `sweet_console_muted`
-    (patch 0067) only fires at the first GUI swap; an early set from a boot-arg
-    (e.g. `sweetmute=1` parsed in `sweet_ufs.c`, next to `sweet_log_start()`)
-    would cover the kernel phase. That needs a CI kernel rebuild — not built yet.
+  - **`sweetmute=1` contingency (if console-bound):** mute the kernel console
+    early. `sweet_log_append()` (patch 0047) already runs *before* the
+    `disableConsoleOutput` check, so a mute keeps the persistent log.
+    `sweet_console_muted` (patch 0067) only fires at the first GUI swap; an early
+    set from a boot-arg (e.g. `sweetmute=1` parsed in `sweet_ufs.c`, next to
+    `sweet_log_start()`) would cover the kernel phase. Needs a CI kernel rebuild.
 
 **M6b (2026-11-17) — iOS 16.7.16 root on `userdata` (jump to line ~595).**
 The iPhone X HFS+ root is flashed to `userdata`, the kernel **mounts it and
