@@ -51,32 +51,48 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   shim left**; (c) the **single-slot UFS read path** (`sweet_ufs_strategy`, one
   command in flight, ≤1 MiB per command, `delay(1)` poll); (d) the **SWEETLOG
   flush thread** contending on `sweet_ufs_lock`.
-- **DIAGNOSTIC READY — shim SWEETLOG read-back + link gear (no CI, no kernel
-  rebuild):** the shim (`shim/loader.c` + `shim/ufs.c` `sweetlog_dump()` /
-  `ufs_link_info()`) now **clears the panel** and prints the negotiated link
-  (`UFS GEAR`/`UFS PWR`), the SWEETLOG header (`total` console bytes + `seq`
-  flush count) and the **last 40 ring lines** the **previous** boot left in
-  `userdata` (patch 0047), then halts with the watchdog disarmed so the panel
-  keeps the text. One flash resolves both hypotheses. Build: `shim/build.sh`
-  locally (WSL `aarch64-linux-gnu-gcc`) → `tools/mkpayload.py` →
-  `tools/mkbootimg-manaus.sh shim/out/Image <payload> <stock dtb> <out> --mode v4`
-  with `sweetdump=1` in the payload cmdline. Images (2026-11-18; ADT `5587666f…`
-  + `/product` verified): `D:\manaus\sweetdump\shim-boot.img` `2b28837d…` (shim
-  `8cec66a8…`) / `shim-vendor_boot.img` `8d0dc7da…`. Flash over the current
-  `boot_a` / `vendor_boot_a`, reboot, photograph the panel. **How to read it:**
-  - `total` ≫ ~20 MB (or 40 identical tail lines) ⇒ a **console/log loop**:
-    console-bound; find the looping writer from the tail, then mute the console.
-  - `total` ≪ 1 MB but the boot still takes 35 min ⇒ **NOT console**; the time is
-    UFS I/O — check `UFS GEAR`/`UFS PWR` (gear 1 / Slow_Mode / 1 lane ⇒ raise it,
-    see below).
-  - `UFS PWR` power-mode field: `0`=Fast_Mode (HS), `1`=Slow_Mode (PWM),
-    `4`=FastAuto, `5`=SlowAuto. **PWM or Slow_Mode is ~100× slower than HS.**
-- **Likely fix if the gear is low (local, no CI):** add Linux
-  `ufshcd_get_max_pwr_mode` + `ufshcd_change_power_mode` to the shim: read
-  `PA_CONNECTEDTXDATALANES`/`PA_MAXTXHSGEAR`/`PA_MAXRXHSGEAR`, set
-  `PA_TXGEAR`/`PA_RXGEAR`/`PA_ACTIVETXDATALANES`/`PA_ACTIVERXDATALANES`/
-  `PA_TXHSADAPTTYPE`, then `PA_PWRMODE`, and read it back. XNU then inherits the
-  faster link. Verify the read-back before trusting it.
+- **✅ CONFIRMED (from Linux source, 2026-11-18): `DME_LINK_STARTUP` leaves the
+  link at PWM-G1 / `SLOWAUTO_MODE` / 1 lane, and only
+  `ufshcd_change_power_mode()` raises it to HS.** `ufshcd_get_max_pwr_mode()`
+  (drivers/ufs/core/ufshcd.c) sets `pwr_tx=pwr_rx=FAST_MODE`,
+  `hs_rate=PA_HS_MODE_B`, then reads `PA_MAXRXHSGEAR` (local → gear_rx) and the
+  **peer's** `PA_MAXRXHSGEAR` (→ gear_tx); `ufshcd_dme_change_power_mode()` then
+  sets PA_RXGEAR/TXGEAR, PA_ACTIVE{RX,TX}DATALANES, PA_{RX,TX}TERMINATION,
+  PA_HSSERIES, the UniPro timeouts, and `DME_SET(PA_PWRMODE) = FAST_MODE<<4 |
+  FAST_MODE`. The shim stopped at link startup, so the link stayed PWM. The
+  shim's logged `PA_PWRMODE=0x55` decodes as tx=5/rx=5 = **SLOWAUTO_MODE (PWM)**
+  (`FAST_MODE=1`, `SLOW_MODE=2`, `FASTAUTO_MODE=4`, `SLOWAUTO_MODE=5`,
+  `include/ufs/unipro.h`). The manaus DT uses `mediatek,mt8183-ufshci` with
+  **none** of the MTK UFS quirks (no `pmc-via-fastauto`), so the plain
+  `ufshcd_dme_change_power_mode` path applies (MTK only adds a
+  `PA_TXHSADAPTTYPE` adapt setting, `PA_INITIAL_ADAPT` at gear ≥ 4).
+- **✅ FIX IMPLEMENTED (local, no CI, no kernel rebuild): `shim/ufs.c`
+  `ufs_raise_gear()`** — the Linux/MTK power-mode change above, gated by the
+  cmdline token **`sweetgear`** (payload path in `shim/loader.c` and the
+  `sweetdump` path). It reads the HS gear capability of both sides + the
+  connected lanes, clamps to HS-G5 / 2 lanes, sets the attributes, issues
+  `DME_SET(PA_PWRMODE)=0x11`, then reads the state back and returns 0 only if
+  the mode is FAST and `HCS.DP` is set. `dme_pwr_mode()` waits on
+  `IS_UIC_COMPL | IS_UIC_PWR` because a PA_PWRMODE change completes on
+  `UIC_POWER_MODE`, not `UIC_COMMAND_COMPL` (matches `ufshcd_uic_pwr_ctrl`).
+  Panel lines: `UFS HSWAS` (before), `UFS HSCAP` (capabilities), `UFS HSPMC`
+  (rc), `UFS HSNOW` (after + HCS + probe state). XNU then inherits the faster
+  link. Build clean: 0 ABS64 relocs, `shim/out/Image` `68f3f8b4…`.
+- **DIAGNOSTIC + FIX IMAGES (2026-11-18; ADT `5587666f…` + `/product` verified):**
+  - `D:\manaus\sweetdump\` — pure diagnostic, `sweetdump=1`. boot `858f70d2…` /
+    vendor_boot `8d0dc7da…`. Prints the **before** link (PWM-G1 expected), the
+    SWEETLOG `total`/`seq` and the last 40 ring lines, then halts (watchdog
+    disarmed) so the panel keeps the text.
+  - `D:\manaus\sweetdump-hs\` — `sweetdump=1 sweetgear=1`. boot `c5b39f65…` /
+    vendor_boot `614b8e2d…`. Same, but raises the gear first and reprints the
+    **after** link — a fast on-panel test of the fix.
+  - `D:\manaus\fast-hs\` — `sweetgear=1`. boot `6a078154…` / vendor_boot
+    `02df7ddc…`. The real accelerated boot (no dump; jumps to XNU).
+  Flash over the current `boot_a`/`vendor_boot_a`, reboot, photograph the panel.
+  **How to read the dump:** `total` ≫ ~20 MB (or 40 identical tail lines) ⇒
+  console-bound (mute the console); `total` ≪ 1 MB ⇒ UFS-bound (the gear is the
+  lever). `UFS PWR mode`: `0`=Fast_Mode (HS), `1`=Slow_Mode, `4`=FastAuto,
+  `5`=SlowAuto; `0x11` after the raise = tx=1/rx=1 = **FAST (HS)**.
 - **Prepared + verified images, patched in place from the proven boot #8 images**
   with the new **`tools/bootimg-cmdline.py`** (only the cmdline token changes;
   ADT `5587666f…` and everything else byte-identical, size unchanged):
