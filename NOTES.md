@@ -64,13 +64,25 @@ MMIO path that panicked in boot M6a.
   Corrected before the second CI run: the first draft used the `mt6853` PMIF
   offsets and the raw `0x38` opcode; both would have caused SPMI read timeouts.
   The driver now logs `PMIF_INIT_DONE` at boot to confirm the PMIF is live.
-- **CI:** first push `8087cca` started run `44550318847` (queued) with the bad
-  PMIF encoding — **do not use its kernel**. The corrected patch is in the next
-  commit; its run ID will be recorded here when it appears.
-- **Not done yet:** CI kernel build, repack with exact stock DTB (249,100 B),
-  cmdline patch, flash, and hardware observation. Do **not** flash the current
-  `D:\manaus\fast\` images with `sweetkeys=1` — they still contain the old
-  Qualcomm key driver and would hit the M6a panic path.
+- **CI:** run `44550318847` (commit `8087cca`) had the bad PMIF encoding and was
+  cancelled/superseded — **do not use its kernel**. Corrected commit `d58f473`
+  built green in run **`44551151099`** (`xnu-manaus-kernel` artifact
+  `14544450264`): `kernel.development.sweet` 17,189,280 B, SHA256
+  `a13f2a922d4b089bc214ee9c3e4b8a4bf761dee8097761f90976af07f73b37d3`
+  (matches the artifact's SHA256SUMS).
+- **Images built (local, not flashed):** `D:\manaus\keys\shim-boot.img` SHA256
+  `8aa9338829d469739d244aae313105fa15dfffc61f80790a3a8e5099dd537289`,
+  `shim-vendor_boot.img` SHA256
+  `20da15a68ba0bb7857a8174904ec116d5dd3c7431a528af62e322b129e0fa2df`.
+  Cmdline (244 B): the standard boot args with **`sweetkeys=1`** and
+  `manausmap=0 sweetdump=1` added; `sweettouch=0 sweetusb=0` unchanged.
+  `verify-bootimg-adt.py`: ADT present, `/product` node with all artwork traits;
+  the vendor image contains the exact stock DTB blob (249,100 B, SHA256
+  `fec0c66d…`), verified byte-for-byte at the expected vendor_dtb offset.
+  Build recipe is saved as `D:\manaus\build-keys.ps1`.
+- **Not done yet:** flash slot `a` and hardware observation. Do **not** flash
+  the current `D:\manaus\fast\` images with `sweetkeys=1` — they still contain
+  the old Qualcomm key driver and would hit the M6a panic path.
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
