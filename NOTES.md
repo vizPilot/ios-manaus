@@ -15,9 +15,9 @@ catalog: the flashed ADT had **no `/product` node**, so MobileGestalt's
 by rebuilding `boot_a`/`vendor_boot_a` with the real iPhone X `/product` node.
 `userdata` (the noflood root) is unchanged from boot #7.
 
-**Current work (2026-11-18): boot acceleration — ✅ SOLVED.** The 35-min boot
-was the UFS link gear, not CPU. The shim now raises the link from PWM to HS
-(`ufs_raise_gear()`, committed `9a7f819`); boot #14 (`fast-hs`) reached the lock
+**Current work (2026-11-18): boot acceleration — ✅ DONE.** The 35-min boot was
+the UFS link gear, not CPU. The shim raises the link from PWM to HS by default
+(`ufs_raise_gear()`, `5baf8aa`); boot #15 (`fast`, no token) reached the lock
 screen in **≈1.5 min** (was 34m52s). See the acceleration section below.
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
@@ -132,7 +132,8 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   #13 `sweetdump-hs` (rebuilt shim) HS + UA handled, log read OK;
   #14 `fast-hs` (`cpus=6 sweetgear=1`) started 2026-11-18 22:07:50 →
   **lock screen in ≈1.5 min** (user-observed);
-  #15 `fast` (`cpus=6`, HS default-on) started 22:11:30, _pending_.
+  #15 `fast` (`cpus=6`, HS default-on, **no token**) started 22:11:30 →
+  **lock screen in ≈1.5 min** (user-observed) ⇒ the default-on change works.
 - **✅ RESULT: the UFS link gear was the serialized 35-min bottleneck.** PWM
   (`PA_PWRMODE=0x55`) → HS (`0x11`) took the boot from **34m52s to ≈1.5 min**
   (~23×). The suspect list (console draw, single-slot read path, SWEETLOG
