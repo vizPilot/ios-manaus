@@ -38,9 +38,13 @@ MMIO path that panicked in boot M6a.
   active-low, with `KP_DEBOUNCE=0x18`, `KP_EN=0x24`, and maps
   `hw_keycode=(i<<4)+j` through `hw-init-map`. `drivers/spmi/spmi-mtk-pmif-core.c`
   shows that `mediatek,mt6879-spmi` uses the `mt6xxx` PMIF register map on
-  software channel 2, so a read is: poll `STA=0x0ca8` idle (FSM 0), write
-  `(0x38<<30)|(SID<<24)|(bc<<16)|addr` to `ACC=0x0c80`, poll FSM 6, read
-  `RDATA=0x0c94`, then write 1 to `VLD_CLR=0x0ca4`. MT6363 is SPMI SID 4.
+  software channel 2: `ACC=0x0880`, `RDATA=0x0894`, `VLD_CLR=0x08a4`,
+  `STA=0x08a8`. The `0x0c80`-family offsets belong to `mt6833`/`mt6853`, not
+  MT6879. A one-byte read polls `STA` for FSM 0 (idle), writes
+  `(3<<30)|(SID<<24)|(bc<<16)|addr` to `ACC` (the encoded command is
+  `PMIF_CMD_EXT_REG_LONG=3`, **not** the raw SPMI opcode `0x38`!), polls FSM 6
+  (`SWINF_WFVLDCLR`), reads `RDATA`, then writes 1 to `VLD_CLR`. MT6363 is SPMI
+  SID 4.
 - **Guesses (must be confirmed on hardware):** PMIC `TOPSTATUS` bit 1 is the
   second key (we map it to volume-up by default); KPD `KP_MEM1` bit 0 is the
   other volume key (we map it to volume-down by default). The stock DT labels
@@ -57,6 +61,12 @@ MMIO path that panicked in boot M6a.
   writes are the KPD debounce/enable registers and the PMIF mailbox. Patch was
   verified to apply cleanly with `git apply --check` against the base series.
   Kept `sweetkeys=0` as the opt-out; set `sweetkeys=1` in the test cmdline.
+  Corrected before the second CI run: the first draft used the `mt6853` PMIF
+  offsets and the raw `0x38` opcode; both would have caused SPMI read timeouts.
+  The driver now logs `PMIF_INIT_DONE` at boot to confirm the PMIF is live.
+- **CI:** first push `8087cca` started run `44550318847` (queued) with the bad
+  PMIF encoding — **do not use its kernel**. The corrected patch is in the next
+  commit; its run ID will be recorded here when it appears.
 - **Not done yet:** CI kernel build, repack with exact stock DTB (249,100 B),
   cmdline patch, flash, and hardware observation. Do **not** flash the current
   `D:\manaus\fast\` images with `sweetkeys=1` — they still contain the old

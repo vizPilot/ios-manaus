@@ -34,7 +34,7 @@ diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_keys.c
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,335 @@
 +/*
 + * SWEET keys on MediaTek MT6879 (Motorola manaus).
 + *
@@ -79,15 +79,17 @@ new file mode 100644
 +#define PMIF_PA                 0x1c804000u
 +#define PMIF_SIZE               0x0900u
 +/* mt6879 uses the mt6xxx PMIF register map with soc_chan = 2. */
-+#define PMIF_SWINF2_ACC         0x0c80u
-+#define PMIF_SWINF2_RDATA       0x0c94u
-+#define PMIF_SWINF2_VLD_CLR     0x0ca4u
-+#define PMIF_SWINF2_STA         0x0ca8u
++#define PMIF_INIT_DONE          0x0000u
++#define PMIF_SWINF2_ACC         0x0880u
++#define PMIF_SWINF2_RDATA       0x0894u
++#define PMIF_SWINF2_VLD_CLR     0x08a4u
++#define PMIF_SWINF2_STA         0x08a8u
 +#define SWINF_IDLE              0u
 +#define SWINF_WFVLDCLR          6u
 +#define GET_SWINF(x)            (((x) >> 1) & 7u)
++/* PMIF_CMD_EXT_REG_LONG (SPMI EXT_READL) is encoded as 3, not the raw 0x38. */
++#define PMIF_CMD_EXT_REG_LONG   3u
 +#define SPMI_SID_MT6363         4u
-+#define SPMI_CMD_EXT_READL      0x38u
 +#define MT6363_TOPSTATUS        0x1eu
 +
 +#define KEY_POLL_MS             20u
@@ -157,7 +159,7 @@ new file mode 100644
 +	if (i == PMIF_SPIN_MAX) {
 +		return false;
 +	}
-+	cmd = (SPMI_CMD_EXT_READL << 30) | (SPMI_SID_MT6363 << 24) |
++	cmd = (PMIF_CMD_EXT_REG_LONG << 30) | (SPMI_SID_MT6363 << 24) |
 +	    (0u << 16) | (uint32_t)addr;
 +	wr32(pmif_base, PMIF_SWINF2_ACC, cmd);
 +	for (i = 0; i < PMIF_SPIN_MAX; ++i) {
@@ -206,8 +208,9 @@ new file mode 100644
 +		return false;
 +	}
 +	ok = pmif_read8(MT6363_TOPSTATUS, &top);
-+	printf("MANAUS KEYS: pmif=%#x top=%#x/%d sta=%#x\n",
-+	    (unsigned)pmif_base, top, ok, rd32(pmif_base, PMIF_SWINF2_STA));
++	printf("MANAUS KEYS: pmif=%#x init=%#x top=%#x/%d sta=%#x\n",
++	    (unsigned)pmif_base, rd32(pmif_base, PMIF_INIT_DONE), top, ok,
++	    rd32(pmif_base, PMIF_SWINF2_STA));
 +	return ok;
 +}
 +
