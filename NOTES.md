@@ -20,6 +20,48 @@ the UFS link gear, not CPU. The shim raises the link from PWM to HS by default
 (`ufs_raise_gear()`, `5baf8aa`); boot #15 (`fast`, no token) reached the lock
 screen in **≈1.5 min** (was 34m52s). See the acceleration section below.
 
+**🔧 INPUT (2026-11-19): volume/power buttons — implementation ready, NOT yet
+built or flashed.** Goal: make the side buttons drive `sweet_hid_key()` on
+manaus without touching any `sweet_*` symbol or reusing the Qualcomm SPMI/PON
+MMIO path that panicked in boot M6a.
+
+- **Observed from the stock DTB** (`D:\manaus\manaus-stock.dts`): two key
+  sources exist. `/spmi@1c804000/pmic@4/mt6363keys` is `mediatek,mt6363-keys`
+  with children `power` (`linux,keycodes=<0x74>` = KEY_POWER) and `home`
+  (`<0x72>` = KEY_VOLUMEDOWN). `/soc/kp@1c00e000` is `mediatek,kp` and its
+  `mediatek,hw-init-map` has exactly one non-zero entry: index 0 → `0x72`.
+  There is no `gpio-keys` node.
+- **Observed from downstream MT6879 kernel sources** (`moto-mt6879/...`,
+  branch `seventeen`): `drivers/input/keyboard/mtk-pmic-keys.c` reads MT6363
+  `TOPSTATUS` (0x1e) with masks `0x1` (PWRKEY) and `0x3` (HOMEKEY); active-low.
+  `drivers/input/keyboard/mtk-kpd.c` reads `KP_MEM1..5` at 0x04..0x14,
+  active-low, with `KP_DEBOUNCE=0x18`, `KP_EN=0x24`, and maps
+  `hw_keycode=(i<<4)+j` through `hw-init-map`. `drivers/spmi/spmi-mtk-pmif-core.c`
+  shows that `mediatek,mt6879-spmi` uses the `mt6xxx` PMIF register map on
+  software channel 2, so a read is: poll `STA=0x0ca8` idle (FSM 0), write
+  `(0x38<<30)|(SID<<24)|(bc<<16)|addr` to `ACC=0x0c80`, poll FSM 6, read
+  `RDATA=0x0c94`, then write 1 to `VLD_CLR=0x0ca4`. MT6363 is SPMI SID 4.
+- **Guesses (must be confirmed on hardware):** PMIC `TOPSTATUS` bit 1 is the
+  second key (we map it to volume-up by default); KPD `KP_MEM1` bit 0 is the
+  other volume key (we map it to volume-down by default). The stock DT labels
+  both `0x72`, so the volume-up wiring is not certain. Boot-arg `manausmap=N`
+  swaps the mapping without a kernel rebuild: 0=pmic0→power, pmic1→vol+,
+  kpd0→vol- (default); 1=pmic0→power, kpd0→vol+, pmic1→vol-;
+  2=pmic1→power, pmic0→vol+, kpd0→vol-; 3=kpd0→power, pmic1→vol+, pmic0→vol-.
+- **Implemented:** new override
+  `xnu/patches-manaus/0060-sweet-keys-touch-drivers.patch` replaces only the
+  `sweet_keys.c` body of the base patch; `sweet_touch.c` and all call sites are
+  unchanged. The new driver polls both sources every 20 ms with 3-sample
+  debounce, primes state from the first sample (no fake events at boot), and
+  calls `sweet_hid_key(0/1/2, down)`. PMIC accesses are read-only; the only
+  writes are the KPD debounce/enable registers and the PMIF mailbox. Patch was
+  verified to apply cleanly with `git apply --check` against the base series.
+  Kept `sweetkeys=0` as the opt-out; set `sweetkeys=1` in the test cmdline.
+- **Not done yet:** CI kernel build, repack with exact stock DTB (249,100 B),
+  cmdline patch, flash, and hardware observation. Do **not** flash the current
+  `D:\manaus\fast\` images with `sweetkeys=1` — they still contain the old
+  Qualcomm key driver and would hit the M6a panic path.
+
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
 verified and committed (`966027b` on `origin/manaus`). Nothing is left
