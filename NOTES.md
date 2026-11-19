@@ -25,8 +25,8 @@ user is replacing the screen before continuing.** Boot #8 is built, flashed,
 verified and committed (`966027b` on `origin/manaus`). Nothing is left
 half-done; resume by re-flashing/rebooting the current images and observing the
 lock screen again. On-device state now: `boot_a`/`vendor_boot_a` =
-`D:\manaus\fast-hs\` (`79bd0b42…` / `02df7ddc…`, boot #14, the accelerated
-boot); `userdata` = the noflood root (`3d9fde99…`); `current-slot=a`,
+`D:\manaus\fast\` (`0265175e…` / `f735ff65…`, boot #15, HS default-on);
+`userdata` = the noflood root (`3d9fde99…`); `current-slot=a`,
 `product=manaus`. Known non-blocking issue:
 lock screen has **no wallpaper** (assets exist under
 `/Library/Wallpaper/Collections/`; likely no preference written because Setup was
@@ -84,18 +84,15 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   Panel lines: `UFS HSWAS` (before), `UFS HSCAP` (capabilities), `UFS HSPMC`
   (rc), `UFS HSNOW` (after + HCS + probe state). XNU then inherits the faster
   link. Build clean: 0 ABS64 relocs, `shim/out/Image` `68f3f8b4…`.
-- **DIAGNOSTIC + FIX IMAGES (rebuilt 2026-11-18 after the `read_blocks` retry +
-  `ufs_raise_gear` re-init/TUR fix; shim `aa1e8aa7…`; ADT `5587666f…` +
-  `/product` verified):**
-  - `D:\manaus\sweetdump\` — pure diagnostic, `sweetdump=1`. boot `fcd6891b…` /
-    vendor_boot `8d0dc7da…`. Prints the **before** link, the
-    SWEETLOG `total`/`seq` and the last 40 ring lines, then halts (watchdog
-    disarmed) so the panel keeps the text.
-  - `D:\manaus\sweetdump-hs\` — `sweetdump=1 sweetgear=1`. boot `e635c229…` /
-    vendor_boot `614b8e2d…`. Same, but raises the gear first and reprints the
-    **after** link + the HS outcome.
-  - `D:\manaus\fast-hs\` — `sweetgear=1`. boot `79bd0b42…` / vendor_boot
-    `02df7ddc…`. The real accelerated boot (no dump; jumps to XNU).
+- **DIAGNOSTIC + FIX IMAGES (rebuilt 2026-11-18; shim `1c398745…` — the HS raise
+  is now default-on; ADT `5587666f…` + `/product` verified):**
+  - `D:\manaus\fast\` — the real boot (no dump; jumps to XNU). boot `0265175e…` /
+    vendor_boot `f735ff65…`; cmdline 220 B, **no** extra token (HS is the default).
+  - `D:\manaus\sweetdump\` — diagnostic, `sweetdump=1`. boot `acc246f3…` /
+    vendor_boot `8d0dc7da…`. Prints the link, the SWEETLOG `total`/`seq` and the
+    last 40 ring lines, then halts (watchdog disarmed) so the panel keeps the text.
+  - `D:\manaus\sweetdump-pwm\` — `sweetdump=1 sweetgear=0` (keeps PWM, for a
+    before/after comparison). boot `e90b5b3c…` / vendor_boot `823e2375…`.
   Flash over the current `boot_a`/`vendor_boot_a`, reboot, photograph the panel.
   **How to read the dump:** `total` ≫ ~20 MB (or 40 identical tail lines) ⇒
   console-bound (mute the console); `total` ≪ 1 MB ⇒ UFS-bound (the gear is the
@@ -134,7 +131,8 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
   #12 `sweetdump-hs` HS reached (`mode=0x11`) but SWEETLOG read hit a UA;
   #13 `sweetdump-hs` (rebuilt shim) HS + UA handled, log read OK;
   #14 `fast-hs` (`cpus=6 sweetgear=1`) started 2026-11-18 22:07:50 →
-  **lock screen in ≈1.5 min** (user-observed).
+  **lock screen in ≈1.5 min** (user-observed);
+  #15 `fast` (`cpus=6`, HS default-on) started 22:11:30, _pending_.
 - **✅ RESULT: the UFS link gear was the serialized 35-min bottleneck.** PWM
   (`PA_PWRMODE=0x55`) → HS (`0x11`) took the boot from **34m52s to ≈1.5 min**
   (~23×). The suspect list (console draw, single-slot read path, SWEETLOG
