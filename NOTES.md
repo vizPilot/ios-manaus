@@ -44,22 +44,39 @@ Boot #8 ran `cpus=1` and needs ~35 min to the lock screen. Levers tested:
    10 s — the cheapest test of write/read contention. Result: _pending_.
 - **Suspects (need data, not guesses):** (a) the **FB text console draw** (patch
   0003: 16×2×8×2 uncached-WC pixel writes per char, and every newline clears
-  *two* full 1080-px rows, all under one console lock); (b) the **single-slot UFS
-  read path** (`sweet_ufs_strategy`, one command in flight, 4 KiB device blocks);
-  (c) the **SWEETLOG flush thread** contending on `sweet_ufs_lock`.
-- **DIAGNOSTIC READY — shim SWEETLOG read-back (no CI, no kernel rebuild):** the
-  shim (`shim/loader.c` + `shim/ufs.c` `sweetlog_dump()`, commit `010d503`) now
-  prints the header (`total` console bytes + `seq` flush count) and the last 20
-  ring lines of the log the **previous** boot left in `userdata` (patch 0047),
-  then halts with the watchdog disarmed so the panel keeps the text. Build:
-  `shim/build.sh` locally (WSL `aarch64-linux-gnu-gcc`) → `tools/mkpayload.py` →
+  *two* full 1080-px rows, all under one console lock); (b) the **UFS link gear**
+  — the shim never raises it (it only does `DME_LINK_STARTUP`, then reads back
+  `PA_TXGEAR`/`PA_RXGEAR`/`PA_PWRMODE`); XNU's `sweet_ufs.c` (`ufs_take_over_host`)
+  just reuses that link, so the **11.31 GiB root is read at whatever gear the
+  shim left**; (c) the **single-slot UFS read path** (`sweet_ufs_strategy`, one
+  command in flight, ≤1 MiB per command, `delay(1)` poll); (d) the **SWEETLOG
+  flush thread** contending on `sweet_ufs_lock`.
+- **DIAGNOSTIC READY — shim SWEETLOG read-back + link gear (no CI, no kernel
+  rebuild):** the shim (`shim/loader.c` + `shim/ufs.c` `sweetlog_dump()` /
+  `ufs_link_info()`) now **clears the panel** and prints the negotiated link
+  (`UFS GEAR`/`UFS PWR`), the SWEETLOG header (`total` console bytes + `seq`
+  flush count) and the **last 40 ring lines** the **previous** boot left in
+  `userdata` (patch 0047), then halts with the watchdog disarmed so the panel
+  keeps the text. One flash resolves both hypotheses. Build: `shim/build.sh`
+  locally (WSL `aarch64-linux-gnu-gcc`) → `tools/mkpayload.py` →
   `tools/mkbootimg-manaus.sh shim/out/Image <payload> <stock dtb> <out> --mode v4`
   with `sweetdump=1` in the payload cmdline. Images (2026-11-18; ADT `5587666f…`
-  + `/product` verified): `D:\manaus\sweetdump\shim-boot.img` `de66a904…` /
-  `shim-vendor_boot.img` `8d0dc7da…`. Flash over the current `boot_a` /
-  `vendor_boot_a`, reboot, photograph the panel. **`total` alone decides:** a
-  huge `total` (tens of MB) ⇒ console-bound; a small one (≪1 MB) ⇒ the time is
-  UFS I/O, not console draw.
+  + `/product` verified): `D:\manaus\sweetdump\shim-boot.img` `2b28837d…` (shim
+  `8cec66a8…`) / `shim-vendor_boot.img` `8d0dc7da…`. Flash over the current
+  `boot_a` / `vendor_boot_a`, reboot, photograph the panel. **How to read it:**
+  - `total` ≫ ~20 MB (or 40 identical tail lines) ⇒ a **console/log loop**:
+    console-bound; find the looping writer from the tail, then mute the console.
+  - `total` ≪ 1 MB but the boot still takes 35 min ⇒ **NOT console**; the time is
+    UFS I/O — check `UFS GEAR`/`UFS PWR` (gear 1 / Slow_Mode / 1 lane ⇒ raise it,
+    see below).
+  - `UFS PWR` power-mode field: `0`=Fast_Mode (HS), `1`=Slow_Mode (PWM),
+    `4`=FastAuto, `5`=SlowAuto. **PWM or Slow_Mode is ~100× slower than HS.**
+- **Likely fix if the gear is low (local, no CI):** add Linux
+  `ufshcd_get_max_pwr_mode` + `ufshcd_change_power_mode` to the shim: read
+  `PA_CONNECTEDTXDATALANES`/`PA_MAXTXHSGEAR`/`PA_MAXRXHSGEAR`, set
+  `PA_TXGEAR`/`PA_RXGEAR`/`PA_ACTIVETXDATALANES`/`PA_ACTIVERXDATALANES`/
+  `PA_TXHSADAPTTYPE`, then `PA_PWRMODE`, and read it back. XNU then inherits the
+  faster link. Verify the read-back before trusting it.
 - **Prepared + verified images, patched in place from the proven boot #8 images**
   with the new **`tools/bootimg-cmdline.py`** (only the cmdline token changes;
   ADT `5587666f…` and everything else byte-identical, size unchanged):
