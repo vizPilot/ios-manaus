@@ -70,19 +70,29 @@ MMIO path that panicked in boot M6a.
   `14544450264`): `kernel.development.sweet` 17,189,280 B, SHA256
   `a13f2a922d4b089bc214ee9c3e4b8a4bf761dee8097761f90976af07f73b37d3`
   (matches the artifact's SHA256SUMS).
-- **Images built (local, not flashed):** `D:\manaus\keys\shim-boot.img` SHA256
-  `8aa9338829d469739d244aae313105fa15dfffc61f80790a3a8e5099dd537289`,
+- **First keys boot was a false start (2026-11-19 12:24):** the image cmdline
+  included `sweetdump=1`. `shim/loader.c` treats *any* `sweetdump` substring as
+  a request to dump the previous SWEETLOG and **halt without jumping to XNU**
+  (`SWEETLOG diagnostic dump (no jump)` / `halted: power+vol-down to reset`).
+  Both user photos showed that dump, not a boot; no `MANAUS KEYS` lines appeared
+  because XNU never started. **Lesson: never add `sweetdump` to a boot image
+  intended to run iOS** (it is only for UFS/log diagnostics). Also learned: this
+  LK does not implement `fastboot boot`, so recovery/ADB SWEETLOG reads are not
+  available; panel photos are the only log channel during bring-up.
+- **Corrected images (cmdline patched in place, no kernel/payload rebuild):**
+  `D:\manaus\keys2\shim-boot.img` SHA256
+  `da561733f2a9e1c815024d244f11d1a83a623ddae73fe152830ae1e1a22dd334`,
   `shim-vendor_boot.img` SHA256
-  `20da15a68ba0bb7857a8174904ec116d5dd3c7431a528af62e322b129e0fa2df`.
-  Cmdline (244 B): the standard boot args with **`sweetkeys=1`** and
-  `manausmap=0 sweetdump=1` added; `sweettouch=0 sweetusb=0` unchanged.
+  `248f82a1447ffa4e7a1181a542cdeffd971011f5ee00af2d22f83bbb46d703b2`.
+  Cmdline (232 B): standard args with **`sweetkeys=1`** and `manausmap=0`,
+  **no `sweetdump`**, `sweettouch=0 sweetusb=0` unchanged.
   `verify-bootimg-adt.py`: ADT present, `/product` node with all artwork traits;
-  the vendor image contains the exact stock DTB blob (249,100 B, SHA256
-  `fec0c66d…`), verified byte-for-byte at the expected vendor_dtb offset.
-  Build recipe is saved as `D:\manaus\build-keys.ps1`.
-- **Not done yet:** flash slot `a` and hardware observation. Do **not** flash
-  the current `D:\manaus\fast\` images with `sweetkeys=1` — they still contain
-  the old Qualcomm key driver and would hit the M6a panic path.
+  the vendor image still contains the exact stock DTB blob (249,100 B, SHA256
+  `fec0c66d…`) at the expected offset. `D:\manaus\build-keys.ps1` was corrected
+  too.
+- **Not done yet:** flash the corrected `keys2` images to slot `a`, boot, and
+  test the buttons at the lock screen. Do **not** flash `D:\manaus\fast\` with
+  `sweetkeys=1` — it still has the old Qualcomm key driver (M6a panic path).
 
 **⏸️ PAUSED (2026-11-18): the phone's touch panel is BROKEN (hardware) — the
 user is replacing the screen before continuing.** Boot #8 is built, flashed,
