@@ -159,7 +159,8 @@ const char *loader_boot(uintptr_t dtb)
 		v |= 0x22000000u;
 		*mode = v;
 		con_hex("UFS up", (uint64_t)ufs_bringup());
-		if (has_substr(p->cmdline, "sweetgear"))
+		/* Default-on; `sweetgear=0` keeps the link at PWM for a before/after dump. */
+		if (!has_substr(p->cmdline, "sweetgear=0"))
 			con_hex("UFS HS ok", (uint64_t)ufs_raise_gear());
 		sweetlog_dump();
 		con_skip();
@@ -182,9 +183,10 @@ const char *loader_boot(uintptr_t dtb)
 		/*
 		 * Raise the link out of PWM-G1 before the jump: XNU's sweet_ufs.c
 		 * reuses whatever gear the shim leaves, so a low gear here makes
-		 * the whole root read (11 GiB) crawl. Opt-in via sweetgear=1.
+		 * the whole root read (11 GiB) crawl (~35 min vs ~1.5 min). On by
+		 * default; `sweetgear=0` disables it for a PWM comparison boot.
 		 */
-		if (has_substr(p->cmdline, "sweetgear"))
+		if (!has_substr(p->cmdline, "sweetgear=0"))
 			con_hex("UFS HS ok", (uint64_t)ufs_raise_gear());
 	}
 
