@@ -947,6 +947,20 @@ int ufs_bringup(void)
 	return link;
 }
 
+/*
+ * Report the negotiated UniPro link parameters. The shim never raises the
+ * gear, so these are exactly what XNU inherits and reads the root at.
+ */
+void ufs_link_info(uint32_t *tx, uint32_t *rx, uint32_t *mode, uint32_t *lanes)
+{
+	uint32_t a2 = 0;
+	*tx = *rx = *mode = *lanes = 0;
+	dme_get(ATTR_PA_TXGEAR, tx, &a2);
+	dme_get(ATTR_PA_RXGEAR, rx, &a2);
+	dme_get(ATTR_PA_PWRMODE, mode, &a2);
+	dme_get(ATTR_PA_ACTIVETXDATALANES, lanes, &a2);
+}
+
 void test_ufs(void)
 {
 	ufs_log1("UFS", "milestone 5 probe v6: device reset + link + fDeviceInit handshake (read-only)");
@@ -1051,6 +1065,18 @@ void sweetlog_dump(void)
 	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
 	static uint8_t chunk[16 * BLOCK] __attribute__((aligned(4096)));
 	static char lines[SWEET_LOG_KEEP][72];
+
+	/* Self-contained: whatever was drawn before is gone. */
+	con_clear(0xff000000);
+
+	/*
+	 * The link gear is the other acceleration suspect: the shim never raises
+	 * the gear, so XNU reads the 11 GiB root at whatever this says.
+	 */
+	uint32_t tx = 0, rx = 0, mode = 0, lanes = 0;
+	ufs_link_info(&tx, &rx, &mode, &lanes);
+	con_hex2("UFS GEAR", "tx=", tx, "rx=", rx);
+	con_hex2("UFS PWR", "mode=", mode, "lanes=", lanes);
 
 	if (read_blocks(0, 2, data)) {
 		con_str("SWEETLOG", "GPT read error");

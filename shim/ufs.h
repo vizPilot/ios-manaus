@@ -9,6 +9,8 @@
 int ufs_bringup(void);
 /* Milestone 5 probe: the same bring-up, then TUR/CAP/READ and a GPT dump. */
 void test_ufs(void);
+/* Negotiated UniPro link parameters (for the panel diagnostic). */
+void ufs_link_info(uint32_t *tx, uint32_t *rx, uint32_t *mode, uint32_t *lanes);
 /*
  * Diagnostic: read the persistent console log (xnu patch 0047) the previous
  * boot left in the last blocks of `userdata` and print its header and tail to
